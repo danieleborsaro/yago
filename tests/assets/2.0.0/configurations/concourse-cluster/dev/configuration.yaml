@@ -1,0 +1,31 @@
+---
+schema: 2.0.0
+namespace: yago
+kind: Configuration
+configuration:
+  meta:
+    parts:
+      self: tests/assets/2.0.0/configurations/concourse-cluster/dev/configuration.yaml
+
+      ## NB: the alternative is to list here extra files from outside the three
+      ##     and always load the entire subtree+extra files regardless of the wrapper
+      ##     what happens if a wrapper complains about non declared variables?
+      ##     ow to handle files that only need to be referenced but not loded/assembled?
+
+  wrappers:
+    concourse:
+      parts:
+        concourse: tests/assets/2.0.0/configurations/concourse-cluster/dev/pipelines/concourse.yaml
+        global: tests/assets/shared/global/concourse.yaml
+        pipelines: tests/assets/shared/global/pipelines.yaml
+
+    terraform:
+      backends:
+        eu-west-1: tests/assets/2.0.0/configurations/concourse-cluster/dev/infrastructure/backends/eu-west-1.tfvars.json
+
+      parts:
+        global: tests/assets/shared/global/project-properties.yaml
+        eco: tests/assets/shared/devops-dev/project-properties.yaml
+        infra: tests/assets/2.0.0/configurations/concourse-cluster/dev/infrastructure/terraform.yaml
+        app: tests/assets/2.0.0/configurations/concourse-cluster/dev/application/application.yaml
+        users: tests/assets/shared/global/linux-users.yaml

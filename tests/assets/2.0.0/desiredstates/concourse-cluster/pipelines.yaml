@@ -1,0 +1,78 @@
+---
+desiredstate:
+  meta:
+    pipelines_as_code:
+      self:
+        is_self_updating: true
+
+      children: []
+
+  components:
+    pipelines:
+      git:
+        url: git@github.com:RedCloudTechnology/cci-pipelines-shared.git
+        branch: main
+        tag: !!str 20260421.1
+        path: !!str .
+        watch:
+          - ./{**,.}/*
+
+
+    # pipelines:
+    #   type: git
+    #   properties:
+    #     url: git@github.com:RedCloudTechnology/cci-pipelines-shared.git
+    #     branch: main
+    #     tag: !!str 20260421.1
+    #     path: !!str .
+    #     watch:
+    #       - ./{**,.}/*
+
+    pipeline_tools:
+      docker:
+        # type: docker
+        # properties:
+        eu-west-1:
+          image: concourse/concourse
+          tag: 7.13.1
+
+  configuration:
+    dev:
+      default: &config_default_dev
+        git:
+          url: git@github.com:danieleborsaro/yago.git
+          branch: main
+          tag: ""
+          path: tests/assets/2.0.0/configurations/concourse-cluster/dev/configuration.yaml
+          watch:
+            - tests/assets/2.0.0/configurations/concourse-cluster/dev/{**,.}/*
+
+      concourse:
+        !!merge <<: *config_default_dev
+
+
+    pre:
+      default: &config_default_pre
+        git:
+          url: git@github.com:danieleborsaro/yago.git
+          branch: main
+          tag: ""
+          path: tests/assets/2.0.0/configurations/concourse-cluster/pre/configuration.yaml
+          watch:
+            - tests/assets/2.0.0/configurations/concourse-cluster/pre/{**,.}/*
+
+      concourse:
+        !!merge <<: *config_default_pre
+
+    prod:
+      default: &config_default_prod
+        git:
+          url: git@github.com:danieleborsaro/yago.git
+          branch: main
+          tag: ""
+          path: tests/assets/2.0.0/configurations/concourse-cluster/prod/configuration.yaml
+          watch:
+            - tests/assets/2.0.0/configurations/concourse-cluster/prod/{**,.}/*
+
+      concourse:
+        !!merge <<: *config_default_prod

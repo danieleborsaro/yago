@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+
+  "x-gitops-paths": {
+    "configuration": {
+      "root": "configuration",
+      "meta": "configuration.meta",
+      "metaRootPath": "configuration.meta.parts.self",
+      "repoToLoad": "configuration.meta.repo",
+      "partsToLoad": "meta.parts",
+      "wrappers": "configuration.wrappers",
+      "concoursePipelineInstances": "concourse.pipelines.instance",
+      "concourseGlobalConfig": "concourse.pipelines.configuration.global"
+    }
+  },
+
+  "$defs": {
+    "sharedMetaParts": {
+      "type": "object",
+      "additionalProperties": true,
+      "patternProperties": {
+        "^self$": {
+          "type": "string"
+        },
+        "^.*$": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "self"
+      ]
+    },
+    "configMeta": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "parts": {
+          "$ref": "#/$defs/sharedMetaParts"
+        }
+      },
+      "required": [
+        "parts"
+      ]
+    },
+    "configWrapperParts": {
+      "type": "object",
+      "additionalProperties": true,
+      "patternProperties": {
+        "^.*$": {
+          "type": "string"
+        }
+      },
+      "minProperties": 1
+    },
+    "configWrapper": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "backends": {
+          "type": "object",
+          "additionalProperties": true,
+          "patternProperties": {
+            "^.*$": {
+              "type": "string"
+            }
+          },
+          "minProperties": 1
+        },
+        "parts": {
+          "$ref": "#/$defs/configWrapperParts"
+        }
+      },
+      "required": [
+        "parts"
+      ]
+    },
+    "configWrappers": {
+      "type": "object",
+      "additionalProperties": false,
+      "patternProperties": {
+        "^.*$": {
+          "$ref": "#/$defs/configWrapper"
+        }
+      },
+      "minProperties": 0
+    }
+  },
+
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string"
+    },
+    "namespace": {
+      "type": "string"
+    },
+    "kind": {
+      "type": "string"
+    },
+    "configuration": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/configMeta"
+        },
+        "wrappers": {
+          "$ref": "#/$defs/configWrappers"
+        }
+      },
+      "required": [
+        "meta"
+      ]
+    }
+  },
+  "required": [
+    "schema",
+    "namespace",
+    "kind",
+    "configuration"
+  ]
+}

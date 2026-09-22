@@ -1,0 +1,202 @@
+---
+project_properties_global:
+  company_name_long: RedCloud Technologies Ltd
+  company_name_short: RedCloud
+
+domain_contacts:
+  contact_type: COMPANY
+  organization_name: Redcloud Technology
+  first_name: Redcloud
+  last_name: Admin
+  email: dnsadmin@redcloudtechnology.com
+  phone_number: !!str +44.7548983575
+  address_line_1: 50, Liverpool Street
+  country_code: GB
+  city: London
+  zip_code: EC2M 7PY
+  extra_params:
+    UK_CONTACT_TYPE: OTHER
+    UK_COMPANY_NUMBER: !!str 297430671
+
+pgp_keys:
+  tcarrondo: keybase:tcarrondo_at_rc
+
+accounts_coding:
+  763196200561:
+    class: management
+    name: management
+    name_encoded: MGM
+    name_canonical: Management
+
+  688899028633:
+    class: development
+    name: devtest
+    name_encoded: DT
+    name_canonical: DevTest
+
+  ## NB: removing leading zero because of terraform issue https://github.com/hashicorp/terraform/issues/28619
+  87101597092:
+    class: development
+    name: dataopsdev
+    name_encoded: DTD
+    name_canonical: DataOpsDev
+
+  122610503113:
+    class: development
+    name: platformdev
+    name_encoded: DPF
+    name_canonical: PlatformDev
+
+  940482426654:
+    class: development
+    name: ailabsandbox
+    name_encoded: AIS
+    name_canonical: AILabSandbox
+
+  891377138316:
+    class: production
+    name: dataopsprod
+    name_encoded: DTP
+    name_canonical: DataOpsProd
+
+  660074321534:
+    class: development
+    name: devopsdev
+    name_encoded: DVD
+    name_canonical: DevOpsDev
+
+  365435414266:
+    class: development
+    name: secopsdev
+    name_encoded: SD
+    name_canonical: SecOpsDev
+
+  201589935043:
+    class: production
+    name: secopsprod
+    name_encoded: SP
+    name_canonical: SecOpsProd
+
+  671731936761:
+    class: production
+    name: uatprod
+    name_encoded: UP
+    name_canonical: UATProduction
+
+  314146309765:
+    class: preproduction
+    name: platformuat
+    name_encoded: UPF
+    name_canonical: PlatformUAT
+
+  219323615454:
+    class: preproduction
+    name: uatshrd
+    name_encoded: U
+    name_canonical: UATShared
+
+  654654300473:
+    class: preproduction
+    name: demoshrd
+    name_encoded: DE
+    name_canonical: DemoShared
+
+  303602494308:
+    class: production
+    name: usprodmrkt
+    name_encoded: USP
+    name_canonical: USProdMarketplace
+
+  ## NB: removing leading zero because of terraform issue https://github.com/hashicorp/terraform/issues/28619
+  70402910518:
+    class: production
+    name: devopsprod
+    name_encoded: DVP
+    name_canonical: DevOpsProd
+
+  766870746146:
+    class: production
+    name: devopsassets
+    name_encoded: DVA
+    name_canonical: DevOpsAssets
+
+  688567265053:
+    class: production
+    name: platformprod
+    name_encoded: PPF
+    name_canonical: PlatformProd
+
+  533267299638:
+    class: production
+    name: prodbracore
+    name_encoded: BPC
+    name_canonical: BRAProdCore
+
+  38462765618:
+    class: production
+    name: prodngacore
+    name_encoded: NPC
+    name_canonical: NGAProdCore
+
+  727646514404:
+    class: production
+    name: prodargcore
+    name_encoded: APC
+    name_canonical: ARGProdCore
+
+  207567789269:
+    class: production
+    name: argprodmrkt
+    name_encoded: APM
+    name_canonical: ARGProdMarketplace
+
+  982534387734:
+    class: production
+    name: zafprodmrkt
+    name_encoded: ZPM
+    name_canonical: ZAFProdMarketplace
+
+  61039766647:
+    class: production
+    name: prodngamrkt
+    name_encoded: NPC
+    name_canonical: NGAProdMarketplace
+
+  841162672972:
+    class: production
+    name: prodbramrkt
+    name_encoded: BRP
+    name_canonical: BRAProdMarketplace
+
+  ## NB: removing leading zero because of terraform issue https://github.com/hashicorp/terraform/issues/28619
+  12633543951:
+    class: production
+    name: sauprodmrkt
+    name_encoded: APM
+    name_canonical: SAUProdMarketplace
+
+  571673065537:
+    class: production
+    name: backups
+    name_encoded: BKS
+    name_canonical: Backups
+
+  558999820373:
+    class: production
+    name: prodnga
+    name_encoded: NGP
+    name_canonical: NGAProd
+
+vpn_cidr_block: !!str 10.1.0.0/18
+all_vpcs_cidr_block: !!str 10.0.0.0/11
+
+vpn_public_prefix_lists:
+  eu-west-1:
+    public: VPN-PL-External-EUW1
+    private: VPN-PL-EUW1
+  sa-east-1:
+    public: VPN-PL-External-SAE1
+    private: VPN-PL-SAE1
+  us-east-2:
+    public: VPN-PL-External-USE2
+    private: VPN-PL-USE2

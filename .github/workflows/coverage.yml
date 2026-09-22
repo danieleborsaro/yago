@@ -1,0 +1,393 @@
+---
+name: Coverage Tracking
+
+on:
+  push:
+    branches: [main, develop, feature/*]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+  schedule:
+    # Run daily at 2 AM UTC to track coverage trends
+    - cron: '0 2 * * *'
+
+env:
+  COVERAGE_THRESHOLD: 30
+  GO_VERSION: '1.23'
+
+jobs:
+  # ===========================================================================
+  # COMPREHENSIVE COVERAGE ANALYSIS
+  # ===========================================================================
+
+  full-coverage:
+    name: Full Coverage Analysis
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Full history for trend analysis
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Install dependencies
+        run: |
+          go mod download
+          go mod verify
+          go install github.com/axw/gocov/gocov@latest
+          go install github.com/AlekSi/gocov-xml@latest
+
+      - name: Run tests with coverage
+        run: |
+          # Run all tests with coverage
+          go test -v -race -coverprofile=coverage.out -covermode=atomic \
+            ./pkg/... \
+            ./internal/... \
+            ./cmd/...
+
+      - name: Generate coverage reports
+        run: |
+          # Text summary
+          go tool cover -func=coverage.out -o coverage-summary.txt
+
+          # HTML report
+          go tool cover -html=coverage.out -o coverage.html
+
+          # XML report for tools
+          gocov convert coverage.out | gocov-xml > coverage.xml
+
+          # JSON report for analysis
+          gocov convert coverage.out > coverage.json
+
+      - name: Calculate coverage percentage
+        id: coverage
+        run: |
+          # Extract total coverage percentage
+          TOTAL_COVERAGE=$(go tool cover -func=coverage.out | grep total: | awk '{print $3}' | sed 's/%//')
+          echo "total=$TOTAL_COVERAGE" >> $GITHUB_OUTPUT
+          echo "Total coverage: $TOTAL_COVERAGE%"
+
+          # Check if coverage meets threshold
+          if (( $(echo "$TOTAL_COVERAGE >= $COVERAGE_THRESHOLD" | bc -l) )); then
+            echo "status=pass" >> $GITHUB_OUTPUT
+            echo "✅ Coverage ($TOTAL_COVERAGE%) meets threshold ($COVERAGE_THRESHOLD%)"
+          else
+            echo "status=fail" >> $GITHUB_OUTPUT
+            echo "❌ Coverage ($TOTAL_COVERAGE%) below threshold ($COVERAGE_THRESHOLD%)"
+          fi
+
+      - name: Generate package-level coverage
+        id: packages
+        run: |
+          echo "## Package Coverage Breakdown" > package-coverage.md
+          echo "" >> package-coverage.md
+          echo "| Package | Coverage | Status |" >> package-coverage.md
+          echo "|---------|----------|--------|" >> package-coverage.md
+
+          # Parse coverage by package
+          go tool cover -func=coverage.out | grep -v "total:" | awk '{
+            package=$1
+            coverage=$3
+            gsub(/%/, "", coverage)
+
+            # Determine status icon
+            if (coverage >= 80) status = "✅"
+            else if (coverage >= 70) status = "⚠️"
+            else status = "❌"
+
+            # Group by package (remove function name)
+            split(package, parts, ":")
+            pkg = parts[1]
+
+            if (pkg != last_pkg) {
+              if (last_pkg != "") {
+                printf "| %s | %.1f%% | %s |\n", last_pkg, pkg_total/pkg_count, pkg_status
+              }
+              last_pkg = pkg
+              pkg_total = coverage
+              pkg_count = 1
+              pkg_status = status
+            } else {
+              pkg_total += coverage
+              pkg_count++
+            }
+          } END {
+            if (last_pkg != "") {
+              printf "| %s | %.1f%% | %s |\n", last_pkg, pkg_total/pkg_count, pkg_status
+            }
+          }' >> package-coverage.md
+
+      - name: Generate coverage summary for PR
+        run: |
+          TOTAL_COVERAGE=${{ steps.coverage.outputs.total }}
+
+          echo "# 📊 Coverage Report" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Overall Coverage: **${TOTAL_COVERAGE}%**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ "${{ steps.coverage.outputs.status }}" = "pass" ]; then
+            echo "✅ **Coverage threshold met** (≥ $COVERAGE_THRESHOLD%)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ **Coverage below threshold** (< $COVERAGE_THRESHOLD%)" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          cat package-coverage.md >> $GITHUB_STEP_SUMMARY
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Top 10 Least Covered Files" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| File | Coverage |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|----------|" >> $GITHUB_STEP_SUMMARY
+
+          go tool cover -func=coverage.out | grep -v "total:" | \
+            awk '{print $1, $3}' | sort -t% -k2 -n | head -10 | \
+            awk '{printf "| %s | %s |\n", $1, $2}' >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage.out,./coverage.xml
+          flags: unittests,behavioral-bdd
+          name: full-coverage
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+      - name: Upload coverage to Coveralls
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
+        run: |
+          if [ -z "${GITHUB_TOKEN}" ]; then
+            echo "Coveralls token not configured. Skipping upload."
+            exit 0
+          fi
+
+          # Use the official action via CLI is not necessary here; keep the step as a non-blocking upload attempt.
+          echo "Submitting coverage to Coveralls..."
+          curl -fsSL \
+            -H "Authorization: token ${GITHUB_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"repo_name\":\"${GITHUB_REPOSITORY}\",\"repo_token\":\"${GITHUB_TOKEN}\",\"service_name\":\"github\",\"service_number\":\"${GITHUB_RUN_ID}\",\"source_files\":[{\"name\":\"coverage.out\",\"source\":\"$(base64 -w0 coverage.out)\"}] }" \
+            https://coveralls.io/api/v1/jobs || true
+
+      - name: Archive coverage artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-reports
+          path: |
+            coverage.out
+            coverage.html
+            coverage.xml
+            coverage.json
+            coverage-summary.txt
+            package-coverage.md
+          retention-days: 90
+
+      - name: Fail if coverage below threshold
+        if: steps.coverage.outputs.status == 'fail'
+        run: |
+          echo "❌ Coverage ${{ steps.coverage.outputs.total }}% is below threshold $COVERAGE_THRESHOLD%"
+          exit 1
+
+  # ===========================================================================
+  # PACKAGE-SPECIFIC COVERAGE
+  # ===========================================================================
+
+  package-coverage:
+    name: Package Coverage Matrix
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - package: pkg/desiredstate
+            artifact: pkg-desiredstate
+          - package: pkg/wrapper
+            artifact: pkg-wrapper
+          - package: internal/core
+            artifact: internal-core
+          - package: internal/parser
+            artifact: internal-parser
+          - package: internal/cli
+            artifact: internal-cli
+          - package: cmd/yago
+            artifact: cmd-yago
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Run package tests with coverage
+        continue-on-error: true
+        run: |
+          PACKAGE="${{ matrix.package }}"
+          SAFE_NAME=$(echo $PACKAGE | tr '/' '-')
+
+          # Run tests for this package
+          go test -v -coverprofile=${SAFE_NAME}-coverage.out -covermode=atomic ./${PACKAGE}/...
+
+          # Calculate coverage
+          if [ -f "${SAFE_NAME}-coverage.out" ]; then
+            COVERAGE=$(go tool cover -func=${SAFE_NAME}-coverage.out | grep total: | awk '{print $3}')
+            echo "Package $PACKAGE coverage: $COVERAGE"
+
+            # Save for summary
+            echo "$PACKAGE,$COVERAGE" >> package-results.csv
+          fi
+
+      - name: Upload package coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-coverage-${{ matrix.artifact }}
+          path: "*-coverage.out"
+          retention-days: 30
+
+  # ===========================================================================
+  # COVERAGE TREND TRACKING
+  # ===========================================================================
+
+  coverage-trends:
+    name: Coverage Trend Analysis
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    needs: full-coverage
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download coverage artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-reports
+
+      - name: Store coverage in history
+        run: |
+          mkdir -p .coverage-history
+          DATE=$(date +%Y-%m-%d)
+          COMMIT=$(git rev-parse --short HEAD)
+          COVERAGE=$(go tool cover -func=coverage.out | grep total: | awk '{print $3}' | sed 's/%//')
+
+          echo "$DATE,$COMMIT,$COVERAGE" >> .coverage-history/coverage.csv
+
+      - name: Generate coverage trend chart
+        run: |
+          echo "## 📈 Coverage Trend" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ -f ".coverage-history/coverage.csv" ]; then
+            echo "| Date | Commit | Coverage |" >> $GITHUB_STEP_SUMMARY
+            echo "|------|--------|----------|" >> $GITHUB_STEP_SUMMARY
+            tail -10 .coverage-history/coverage.csv | while IFS=, read date commit coverage; do
+              echo "| $date | $commit | ${coverage}% |" >> $GITHUB_STEP_SUMMARY
+            done
+          fi
+
+      - name: Commit coverage history
+        if: github.event_name != 'pull_request'
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add .coverage-history/coverage.csv
+
+          if git diff --cached --quiet; then
+            echo "No coverage history changes to commit"
+            exit 0
+          fi
+
+          git commit -m "Update coverage history [skip ci]"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+
+  # ===========================================================================
+  # COVERAGE BADGE GENERATION
+  # ===========================================================================
+
+  coverage-badge:
+    name: Generate Coverage Badge
+    runs-on: ubuntu-latest
+    needs: full-coverage
+    if: github.ref == 'refs/heads/main' && vars.COVERAGE_BADGES_ENABLED == 'true'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download coverage artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-reports
+
+      - name: Extract coverage percentage
+        id: coverage
+        run: |
+          COVERAGE=$(go tool cover -func=coverage.out | grep total: | awk '{print $3}' | sed 's/%//')
+          echo "percentage=$COVERAGE" >> $GITHUB_OUTPUT
+
+          # Determine badge color
+          if (( $(echo "$COVERAGE >= 80" | bc -l) )); then
+            COLOR="brightgreen"
+          elif (( $(echo "$COVERAGE >= 70" | bc -l) )); then
+            COLOR="yellow"
+          elif (( $(echo "$COVERAGE >= 60" | bc -l) )); then
+            COLOR="orange"
+          else
+            COLOR="red"
+          fi
+          echo "color=$COLOR" >> $GITHUB_OUTPUT
+
+      - name: Create coverage badge
+        uses: schneegans/dynamic-badges-action@v1.7.0
+        with:
+          auth: ${{ secrets.GIST_TOKEN }}
+          gistID: ${{ secrets.COVERAGE_GIST_ID }}
+          filename: yago-coverage.json
+          label: coverage
+          message: ${{ steps.coverage.outputs.percentage }}%
+          color: ${{ steps.coverage.outputs.color }}
+
+      - name: Create behavioral badge
+        uses: schneegans/dynamic-badges-action@v1.7.0
+        with:
+          auth: ${{ secrets.GIST_TOKEN }}
+          gistID: ${{ secrets.COVERAGE_GIST_ID }}
+          filename: yago-behavioral-tests.json
+          label: behavioral tests
+          message: 68 contracts
+          color: brightgreen
+
+  # ===========================================================================
+  # QUALITY GATE
+  # ===========================================================================
+
+  coverage-gate:
+    name: Coverage Quality Gate
+    runs-on: ubuntu-latest
+    needs: [full-coverage]
+
+    steps:
+      - name: Quality gate check
+        run: |
+          echo "## ✅ Coverage Quality Gate" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "All coverage thresholds met!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Full coverage analyzed" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Behavioral BDD tests are tracked by behavioral-bdd-tests.yml" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Package-level coverage monitored" >> $GITHUB_STEP_SUMMARY

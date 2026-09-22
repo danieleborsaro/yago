@@ -1,0 +1,19 @@
+---
+project_properties_eco:
+  cost_centre: tbd
+  owner: devops@redcloudtechnology.com
+  aws_account_id: "660074321534"
+
+infrastructure_properties:
+
+  dns:
+    eu-west-1:
+      shared_interactive: devops-dev.red101.com
+      shared_technical: devops-dev.red101.tech
+
+      primary_zone: devops-dev.red101.com
+      primary_zone_technical: devops-dev.red101.tech
+
+      shared_technical_internal: devops.int.dev.red101.tech
+
+cicd_cidr_block: !!str 10.2.0.0/18

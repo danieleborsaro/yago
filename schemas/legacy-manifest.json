@@ -1,0 +1,22 @@
+{
+  "manifest": {
+    "name": "GitOps Legacy Schemas",
+    "description": "Core GitOps desiredstate and configuration schemas",
+    "version": "1.0.0",
+    "namespace": "legacy"
+  },
+  "schemas": [
+    {
+      "version": "4.2.0",
+      "kind": "DesiredState",
+      "file": "legacy-v4.2.0-desiredstate.json",
+      "description": "Advanced GitOps desiredstate schema v4.2.0"
+    },
+    {
+      "version": "4.2.0",
+      "kind": "Configuration",
+      "file": "legacy-v4.2.0-configuration.json",
+      "description": "Advanced GitOps configuration schema v4.2.0"
+    }
+  ]
+}

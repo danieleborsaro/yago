@@ -1,0 +1,14 @@
+---
+concourse:
+  pipelines:
+    configuration:
+      global:
+        cluster:
+          server_url: https://cci.devops-dev.red101.tech
+          docker_host: tcp://172.17.0.1:2375
+          # docker_host: unix:///var/run/docker.sock
+          support_bucket:
+            name: redcloud-d-devops-dev-cci-state-euw1
+            region: eu-west-1
+            encryption_type: "aws:kms" #AES256
+            kms_key_id: deef9648-e253-455b-8bc4-686110cef57f #8b657e3f-cb9c-4c20-96b7-61f3194a3f53

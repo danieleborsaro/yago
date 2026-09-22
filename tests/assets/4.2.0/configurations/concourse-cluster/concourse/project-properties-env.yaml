@@ -1,0 +1,6 @@
+---
+project_properties_env:
+  infra_environment: devops-dev
+  app_environment: shared
+  resource_set_long: Concourse CI
+  resource_set_short: cci

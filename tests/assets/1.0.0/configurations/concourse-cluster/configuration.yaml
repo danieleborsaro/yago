@@ -1,0 +1,23 @@
+---
+schema: 1.0.0
+namespace: yago
+kind: Configuration
+configuration:
+  meta:
+    parts:
+      self: tests/assets/1.0.0/concourse-cluster/configurations/configuration.yaml
+
+  content:
+    wrappers:
+      concourse:
+        parts:
+          self: tests/assets/1.0.0/concourse-cluster/configurations/concourse/concourse.yaml
+        global: tests/assets/shared/configurations/concourse.yaml
+
+      terraform:
+        backends:
+          eu-west-1: tests/assets/1.0.0/concourse-cluster/configurations/terraform/backends/eu-west-1.tfvars.json
+
+        parts:
+          self: tests/assets/1.0.0/concourse-cluster/configurations/terraform/terraform.yaml
+          two: tests/assets/1.0.0/concourse-cluster/configurations/terraform/terraform2.yaml

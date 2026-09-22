@@ -1,0 +1,88 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://gitops.example.com/schemas/test-custom-paths/desiredstate-meta.json",
+  "title": "Test Schema with Custom Property Paths",
+  "description": "Schema for testing dynamic property path discovery with custom paths",
+  "type": "object",
+  "x-gitops-paths": {
+    "desiredstate": {
+      "root": "desiredstate",
+      "meta": "desiredstate.meta",
+      "metaRootPath": "desiredstate.meta.parts.self",
+      "metaEcosystem": "desiredstate.meta.ecosystem",
+      "contentEcosystem": "desiredstate.ecosystem",
+      "repoToLoad": "desiredstate.meta.repo",
+      "partsToLoad": "meta.parts",
+      "masterPipelineIsSelfUpdating": "desiredstate.meta.master_pipeline.master.is_self_updating",
+      "slavePipelinesRepoList": "desiredstate.meta.master_pipeline.slaves",
+      "_comment": "Custom paths below - these are plugin-specific extensions",
+      "customOrgCostCenter": "desiredstate.meta.organization.cost_center",
+      "customOrgOwner": "desiredstate.meta.organization.owner",
+      "customComplianceTags": "desiredstate.meta.compliance.tags",
+      "customProjectMetrics": "desiredstate.meta.metrics.project",
+      "configRepoLocatorPrimary": "desiredstate.meta.locators.primary.{environment}.{wrapper}",
+      "configRepoLocatorPrimaryGit": "desiredstate.meta.locators.primary.{environment}.{wrapper}.git",
+      "configRepoLocatorLegacy": "desiredstate.meta.locators.legacy.{environment}.{wrapper}",
+      "configRepoLocatorLegacyGit": "desiredstate.meta.locators.legacy.{environment}.{wrapper}.git"
+    },
+    "configuration": {
+      "root": "configuration",
+      "meta": "configuration.meta",
+      "metaRootPath": "configuration.meta.parts.self",
+      "metaEcosystem": "configuration.meta.ecosystem",
+      "contentEcosystem": "configuration.ecosystem",
+      "repoToLoad": "configuration.meta.repo",
+      "partsToLoad": "meta.parts",
+      "masterPipelineIsSelfUpdating": "configuration.meta.master_pipeline.master.is_self_updating",
+      "slavePipelinesRepoList": "configuration.meta.master_pipeline.slaves",
+      "wrappers": "configuration.content.wrappers",
+      "_comment": "Custom paths for configuration",
+      "customOrgCostCenter": "configuration.meta.organization.cost_center",
+      "customOrgOwner": "configuration.meta.organization.owner"
+    }
+  },
+  "properties": {
+    "meta": {
+      "type": "object",
+      "properties": {
+        "ecosystem": {
+          "type": "string"
+        },
+        "organization": {
+          "type": "object",
+          "properties": {
+            "cost_center": {
+              "type": "string",
+              "description": "Organization cost center for billing"
+            },
+            "owner": {
+              "type": "string",
+              "description": "Organization owner email"
+            }
+          }
+        },
+        "compliance": {
+          "type": "object",
+          "properties": {
+            "tags": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Compliance tags for audit trail"
+            }
+          }
+        },
+        "metrics": {
+          "type": "object",
+          "properties": {
+            "project": {
+              "type": "object",
+              "description": "Project-level metrics"
+            }
+          }
+        }
+      }
+    }
+  }
+}

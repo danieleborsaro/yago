@@ -1,0 +1,12 @@
+---
+concourse:
+  pipelines:
+    instances:
+      - instance:
+          name: check-workers
+          template: pipelines/check-workers-and-tools.yaml
+          repo: desiredstate.content.components.sourcecode.pipelines
+          team: master
+          region: eu-west-1
+
+        configuration: {}

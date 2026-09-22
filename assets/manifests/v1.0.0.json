@@ -1,0 +1,74 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/danieleborsaro/yago/schemas/manifest/v1.0.0",
+  "title": "YAGO Schema Manifest v1.0.0",
+  "description": "JSON Schema for YAGO schema manifest files version 1.0.0. Schemas are indexed as '<namespace>-<version>-<kind>'. Documents can optionally specify a 'namespace' field at root level; if omitted, defaults to 'yago'.",
+  "type": "object",
+  "required": ["manifest", "schemas"],
+  "additionalProperties": false,
+  "properties": {
+    "manifest": {
+      "type": "object",
+      "description": "Metadata about the schema collection",
+      "required": ["name", "version", "namespace"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Display name for the schema collection",
+          "minLength": 1,
+          "examples": ["Core GitOps Schemas", "Custom Organization Schemas"]
+        },
+        "description": {
+          "type": "string",
+          "description": "Optional description of the schema collection purpose"
+        },
+        "version": {
+          "type": "string",
+          "description": "Manifest format version - must be 1.0.0",
+          "const": "1.0.0"
+        },
+        "namespace": {
+          "type": "string",
+          "description": "Schema namespace identifier. Can be any alphanumeric string with hyphens, underscores, dots, and colons (e.g., 'yago', 'my-org', 'aws_provider', 'io.k8s.api', 'org:team:project'). Core YAGO schemas use 'yago' namespace. Schemas are indexed as '<namespace>-<version>-<kind>' internally. Documents can optionally specify a 'namespace' field at root level to use schemas from different namespaces.",
+          "pattern": "^[a-zA-Z0-9_:.\\-]+$",
+          "minLength": 1,
+          "examples": ["yago", "my-org", "custom-schemas", "aws_provider", "io.k8s.api", "org:team:project"]
+        }
+      }
+    },
+    "schemas": {
+      "type": "array",
+      "description": "List of schema definitions in this collection",
+      "items": {
+        "type": "object",
+        "required": ["version", "kind", "file"],
+        "additionalProperties": false,
+        "properties": {
+          "version": {
+            "type": "string",
+            "description": "Schema version number",
+            "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
+            "examples": ["4.2.0", "1.0.0", "2.1.0"]
+          },
+          "kind": {
+            "type": "string",
+            "description": "Document kind this schema applies to",
+            "enum": ["DesiredState", "Configuration"]
+          },
+          "file": {
+            "type": "string",
+            "description": "Path to the JSON schema file (relative to manifest)",
+            "minLength": 1,
+            "pattern": "\\.json$",
+            "examples": ["desired-state-4.2.0.json", "configuration-4.2.0.json"]
+          },
+          "description": {
+            "type": "string",
+            "description": "Optional description of this schema"
+          }
+        }
+      }
+    }
+  }
+}

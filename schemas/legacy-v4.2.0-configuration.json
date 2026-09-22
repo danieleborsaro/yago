@@ -1,0 +1,723 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+
+  "x-gitops-paths": {
+    "configuration": {
+      "root": "configuration",
+      "meta": "configuration.meta",
+      "metaRootPath": "configuration.meta.parts.self",
+      "repoToLoad": "configuration.meta.repo",
+      "partsToLoad": "meta.parts",
+      "wrappers": "configuration.content.wrappers",
+      "concoursePipelineInstances": "concourse.pipelines.instances",
+      "concourseGlobalConfig": "concourse.pipelines.configuration.global"
+    }
+  },
+
+  "$defs": {
+    "dsMeta": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repo": {
+          "$ref": "#/$defs/sharedMetaRepo"
+        },
+        "change_management": {
+          "$ref": "#/$defs/sharedMetaChangeManagement"
+        },
+        "parts": {
+          "$ref": "#/$defs/sharedMetaParts"
+        },
+        "ecosystem": {
+          "$ref": "#/$defs/sharedMetaEcosystem"
+        },
+        "master_pipeline": {
+          "$ref": "#/$defs/sharedMetaPipelines"
+        }
+      },
+      "required": [
+        "repo",
+        "parts"
+      ]
+    },
+    "sharedMetaRepo": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "url": {
+          "type": "string",
+          "format": "uri"
+        },
+        "branch": {
+          "type": "string"
+        },
+        "tag": {
+          "type": "string"
+        },
+        "watch": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "uri"
+          },
+          "minItems": 0,
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "url",
+        "branch",
+        "tag",
+        "watch"
+      ]
+    },
+    "sharedMetaParts": {
+      "type": "object",
+      "additionalProperties": true,
+      "patternProperties": {
+        "^self$": {
+          "type": "string"
+        },
+        "^.*$": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "self"
+      ]
+    },
+    "sharedMetaEcosystem": {
+      "type": "object",
+      "additionalProperties": true,
+      "patternProperties": {
+        "^.*$": {
+          "$ref": "#/$defs/dsComponentRepo"
+        }
+      },
+      "minProperties": 0
+    },
+    "dsComponentRepo": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "url": {
+          "type": "string",
+          "format": "uri"
+        },
+        "branch": {
+          "type": "string"
+        },
+        "tag": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "watch": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "uri"
+          },
+          "minItems": 0,
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "url",
+        "branch",
+        "tag",
+        "path",
+        "watch"
+      ]
+    },
+    "dsComponentArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "ami": {
+          "$ref": "#/$defs/dsComponentArtifactAmi"
+        },
+        "ansible": {
+          "$ref": "#/$defs/dsComponentArtifactAnsible"
+        },
+        "composer": {
+          "$ref": "#/$defs/dsComponentArtifactComposer"
+        },
+        "docker": {
+          "$ref": "#/$defs/dsComponentArtifactDocker"
+        },
+        "magento": {
+          "$ref": "#/$defs/dsComponentArtifactMagento"
+        },
+        "python": {
+          "$ref": "#/$defs/dsComponentArtifactPython"
+        },
+        "s3": {
+          "$ref": "#/$defs/dsComponentArtifactS3"
+        },
+        "web": {
+          "$ref": "#/$defs/dsComponentArtifactWeb"
+        },
+        "vtex": {
+          "$ref": "#/$defs/dsComponentArtifactVtex"
+        }
+      },
+      "minProperties": 1
+    },
+    "dsComponentArtifactAmi": {
+      "type": "object",
+      "additionalProperties": false,
+      "patternProperties": {
+        "^.*$": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "owner": {
+              "type": "string"
+            },
+            "platform": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "owner",
+            "platform"
+          ]
+        }
+      },
+      "minProperties": 1
+    },
+    "dsComponentArtifactDocker": {
+      "type": "object",
+      "additionalProperties": false,
+      "patternProperties": {
+        "^.*$": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "image": {
+              "type": "string"
+            },
+            "tag": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "image",
+            "tag"
+          ]
+        }
+      },
+      "minProperties": 1
+    },
+    "dsComponentArtifactPython": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "url": {
+          "type": "string"
+        },
+        "tag": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "url",
+        "tag"
+      ]
+    },
+    "dsComponentArtifactS3": {
+      "type": "object",
+      "additionalProperties": false,
+      "patternProperties": {
+        "^.*$": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "uri": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "uri"
+          ]
+        }
+      },
+      "minProperties": 1
+    },
+    "configParts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "self": {
+          "type": "string"
+        },
+        "terraform": {
+          "$ref": "#/$defs/configPartTerraform"
+        }
+      },
+      "required": [
+        "self"
+      ],
+      "minProperties": 1
+    },
+    "configPartTerraform": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "backends": {
+          "type": "object",
+          "additionalProperties": true,
+          "patternProperties": {
+            "^.*$": {
+              "type": "string"
+            }
+          },
+          "minProperties": 1
+        },
+        "parts": {
+          "$ref": "#/$defs/configWrapperParts"
+        }
+      },
+      "required": [
+        "backends",
+        "parts"
+      ],
+      "minProperties": 1
+    },
+    "configWrapperParts": {
+      "type": "object",
+      "additionalProperties": true,
+      "patternProperties": {
+        "^self$": {
+          "type": "string"
+        },
+        "^.*$": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "self"
+      ]
+    },
+    "configMeta": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "parts": {
+          "$ref": "#/$defs/sharedMetaParts"
+        }
+      },
+      "required": [
+        "parts"
+      ],
+      "minProperties": 1
+    },
+    "sharedMetaPipelines": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "master": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "is_self_updating": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "is_self_updating"
+          ]
+        },
+        "slaves": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/dsComponentRepo"
+          }
+        }
+      },
+      "required": [
+        "master",
+        "slaves"
+      ]
+    },
+    "configPartConcourse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "teams": {
+          "type": "string"
+        },
+        "roles": {
+          "type": "object",
+          "additionalProperties": true,
+          "patternProperties": {
+            "^.*$": {
+              "type": "string"
+            }
+          },
+          "minProperties": 1
+        },
+        "parts": {
+          "$ref": "#/$defs/configWrapperParts"
+        }
+      },
+      "required": [
+        "parts"
+      ],
+      "minProperties": 1
+    },
+    "configPartPacker": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "parts": {
+          "$ref": "#/$defs/configWrapperParts"
+        }
+      },
+      "required": [
+        "parts"
+      ],
+      "minProperties": 1
+    },
+    "configPartDocker": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "parts": {
+          "$ref": "#/$defs/configWrapperParts"
+        }
+      },
+      "required": [
+        "parts"
+      ],
+      "minProperties": 1
+    },
+    "dsComponentArtifactComposer": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ]
+    },
+    "configPartMySQL": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "parts": {
+          "$ref": "#/$defs/configWrapperParts"
+        }
+      },
+      "required": [
+        "parts"
+      ],
+      "minProperties": 1
+    },
+    "configContentServiceEndpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "patternProperties": {
+        "^.*$": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "fqdn": {
+              "type": "object",
+              "additionalProperties": false,
+              "patternProperties": {
+                "^.*$": {
+                  "type": "string"
+                }
+              },
+              "minProperties": 1
+            },
+            "protocol": {
+              "type": "string"
+            },
+            "port": {
+              "type": "string"
+            },
+            "paths": {
+              "type": "object",
+              "additionalProperties": false,
+              "patternProperties": {
+                "^.*$": {
+                  "type": "string"
+                }
+              },
+              "minProperties": 1
+            }
+          },
+          "minProperties": 0
+        }
+      },
+      "minProperties": 0
+    },
+    "configContentServiceDatabase": {
+      "type": "object",
+      "additionalProperties": false,
+      "patternProperties": {
+        "^.*$": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "infra": {
+              "type": "object",
+              "additionalProperties": false,
+              "patternProperties": {
+                "^.*$": {
+                  "type": "string"
+                }
+              },
+              "minProperties": 1
+            },
+            "schema": {
+              "type": "object",
+              "additionalProperties": false,
+              "patternProperties": {
+                "^.*$": {
+                  "type": "string"
+                }
+              },
+              "minProperties": 1
+            }
+          },
+          "minProperties": 0
+        }
+      },
+      "minProperties": 0
+    },
+    "dsComponentArtifactWeb": {
+      "type": "object",
+      "additionalProperties": false,
+      "patternProperties": {
+        "^.*$": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "uri": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "uri"
+          ]
+        }
+      },
+      "minProperties": 1
+    },
+    "dsComponentArtifactAnsible": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "collection": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string"
+            },
+            "uri": {
+              "type": "string"
+            },
+            "roles": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "version",
+            "uri",
+            "roles"
+          ]
+        }
+      },
+      "required": [
+        "collection"
+      ]
+    },
+    "dsComponentArtifactMagento": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "qualitypatches": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "qualitypatches"
+      ]
+    },
+    "sharedMetaChangeManagement": {
+      "type": "object",
+      "additionalProperties": false,
+      "patternProperties": {
+        "jira_issue": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "jira_issue"
+      ]
+    },
+    "dsComponentArtifactVtex": {
+      "type": "object",
+      "properties": {
+        "app": {
+          "type": "string"
+        },
+        "tag": {
+          "type": "string"
+        },
+        "vendor": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "app",
+        "tag",
+        "vendor"
+      ]
+    },
+    "configPartVtex": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "parts": {
+          "$ref": "#/$defs/configWrapperParts"
+        }
+      },
+      "required": [
+        "parts"
+      ],
+      "minProperties": 1
+    },
+    "configPartOry": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "parts": {
+          "$ref": "#/$defs/configWrapperParts"
+        },
+        "scopes": {
+          "type": "object",
+          "additionalProperties": true,
+          "patternProperties": {
+            "^.*$": {
+              "type": "string"
+            }
+          },
+          "minProperties": 1
+        }
+      },
+      "required": [
+        "parts",
+        "scopes"
+      ],
+      "minProperties": 1
+    },
+    "configPartGithub": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "parts": {
+          "$ref": "#/$defs/configWrapperParts"
+        }
+      },
+      "required": [
+        "parts"
+      ],
+      "minProperties": 1
+    },
+    "configPartPostgreSQL": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "parts": {
+          "$ref": "#/$defs/configWrapperParts"
+        }
+      },
+      "required": [
+        "parts"
+      ],
+      "minProperties": 1
+    },
+    "configPartMSBuild": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "parts": {
+          "$ref": "#/$defs/configWrapperParts"
+        }
+      },
+      "required": [
+        "parts"
+      ],
+      "minProperties": 1
+    }
+  },
+  "configContentService": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "Service": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "services": {
+            "type": "object",
+            "additionalProperties": false,
+            "patternProperties": {
+              "^.*$": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "endpoints": {
+                    "$ref": "#/$defs/configContentServiceEndpoint"
+                  },
+                  "database": {
+                    "$ref": "#/$defs/configContentServiceDatabase"
+                  }
+                },
+                "minProperties": 0
+              }
+            },
+            "minProperties": 0
+          },
+          "target": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "target",
+          "services"
+        ],
+        "minProperties": 1
+      }
+    },
+    "required": [
+      "Service"
+    ],
+    "minProperties": 1
+  }
+}

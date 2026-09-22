@@ -1,0 +1,16 @@
+{
+  "manifest": {
+    "name": "Invalid Manifest Test",
+    "description": "Manifest with invalid version for testing",
+    "version": "2.0.0",
+    "namespace": "yago"
+  },
+  "schemas": [
+    {
+      "version": "1.0.0",
+      "kind": "DesiredState",
+      "file": "test.json",
+      "description": "Test schema"
+    }
+  ]
+}

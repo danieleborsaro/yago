@@ -1,0 +1,20 @@
+---
+schema: 1.0.0
+namespace: yago
+kind: DesiredState
+desiredstate:
+  meta:
+    is_override_schema_in_config: true
+    repo: &desiredstate_default
+      url: git@github.com:danieleborsaro/yago.git
+      branch: main
+      tag: ''
+      watch:
+        - tests/assets/1.0.0/concourse-cluster/desiredstates/{**,.}/*
+
+    parts:
+      self: tests/assets/1.0.0/concourse-cluster/desiredstates/desiredstate.yaml
+      terraform: tests/assets/1.0.0/concourse-cluster/desiredstates/terraform/terraform.yaml
+      concourse: tests/assets/1.0.0/concourse-cluster/desiredstates/concourse/concourse.yaml
+
+    ecosystem: {}

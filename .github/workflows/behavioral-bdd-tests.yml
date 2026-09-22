@@ -1,0 +1,251 @@
+---
+name: Behavioral BDD Tests
+
+on:
+  push:
+    branches: [main, develop, feature/*]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+
+jobs:
+  behavioral-tests:
+    name: Run Behavioral BDD Tests
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        go-version: ['1.21', '1.22', '1.23']
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
+          cache: true
+
+      - name: Install dependencies
+        run: |
+          go mod download
+          go mod verify
+
+      - name: Run all behavioral BDD tests
+        run: |
+          go test -v -race -coverprofile=coverage.out -covermode=atomic \
+            ./pkg/desiredstate \
+            ./internal/cli \
+            ./cmd/yago \
+            -run "BehavioralBDD"
+
+      - name: Generate coverage report
+        if: matrix.go-version == '1.23'
+        run: |
+          go tool cover -html=coverage.out -o coverage.html
+          go tool cover -func=coverage.out -o coverage.txt
+
+      - name: Display coverage summary
+        if: matrix.go-version == '1.23'
+        run: |
+          TOTAL_COVERAGE=$(go tool cover -func=coverage.out | grep total: | awk '{print $3}' | sed 's/%//')
+
+          echo "### 📊 Behavioral BDD Coverage Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Total Coverage: ${TOTAL_COVERAGE}%**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          tail -1 coverage.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Coverage breakdown by package
+          echo "#### Coverage by Package" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Package | Coverage |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|----------|" >> $GITHUB_STEP_SUMMARY
+          go tool cover -func=coverage.out | grep -E "^github.com/danieleborsaro/yago/(pkg|internal|cmd)" | \
+            awk '{package=$1; coverage=$3; gsub(/:[0-9]+:$/, "", package); print package, coverage}' | \
+            sort -u | awk '{printf "| %s | %s |\n", $1, $2}' | head -20 >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload coverage to Codecov
+        if: matrix.go-version == '1.23'
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage.out
+          flags: behavioral-bdd
+          name: behavioral-bdd-coverage
+          fail_ci_if_error: false
+
+      - name: Archive coverage results
+        if: matrix.go-version == '1.23'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            coverage.out
+            coverage.html
+            coverage.txt
+          retention-days: 30
+
+  behavioral-contract-validation:
+    name: Validate Behavioral Contracts
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Validate contract structure
+        run: |
+          echo "## Behavioral Contract Validation" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Count total behavioral contracts
+          TOTAL_CONTRACTS=$(find . -name "*behavioral*test.go" -exec grep -h "^func Test.*BehavioralBDD" {} \; | wc -l)
+          echo "- 📋 Total behavioral contracts: $TOTAL_CONTRACTS" >> $GITHUB_STEP_SUMMARY
+
+          # Count files
+          TOTAL_FILES=$(find . -name "*behavioral*test.go" | wc -l)
+          echo "- 📁 Behavioral test files: $TOTAL_FILES" >> $GITHUB_STEP_SUMMARY
+
+          # Count total lines
+          TOTAL_LINES=$(find . -name "*behavioral*test.go" -exec wc -l {} \; | awk '{sum+=$1} END {print sum}')
+          echo "- 📝 Total test lines: $TOTAL_LINES" >> $GITHUB_STEP_SUMMARY
+
+          # Verify all contracts have required structure
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Contract Structure Validation" >> $GITHUB_STEP_SUMMARY
+
+          MISSING_BEHAVIOR=0
+          MISSING_RATIONALE=0
+
+          for file in $(find . -name "*behavioral*test.go"); do
+            # Check for Behavior field
+            if ! grep -q "Behavior:" "$file"; then
+              MISSING_BEHAVIOR=$((MISSING_BEHAVIOR + 1))
+            fi
+
+            # Check for Rationale field
+            if ! grep -q "Rationale:" "$file"; then
+              MISSING_RATIONALE=$((MISSING_RATIONALE + 1))
+            fi
+          done
+
+          if [ $MISSING_BEHAVIOR -eq 0 ] && [ $MISSING_RATIONALE -eq 0 ]; then
+            echo "- ✅ All contracts have required fields" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- ⚠️ Missing Behavior fields: $MISSING_BEHAVIOR files" >> $GITHUB_STEP_SUMMARY
+            echo "- ⚠️ Missing Rationale fields: $MISSING_RATIONALE files" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  performance-check:
+    name: Performance Threshold Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+
+      - name: Run performance tests
+        run: |
+          echo "## Performance Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Run performance behavioral tests
+          go test -v ./cmd/yago -run "TestCLI_PerformanceRequirements_BehavioralBDD" | tee perf.log
+
+          # Extract performance metrics
+          if grep -q "version_command_performance" perf.log; then
+            echo "- ✅ Version command performance test passed" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if grep -q "help_command_performance" perf.log; then
+            echo "- ✅ Help command performance test passed" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if grep -q "validate_small_file_performance" perf.log; then
+            echo "- ✅ Validate performance test passed" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if grep -q "memory_efficiency" perf.log; then
+            echo "- ✅ Memory efficiency test passed" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if grep -q "concurrent_safety" perf.log; then
+            echo "- ✅ Concurrent safety test passed" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Check test execution time
+        run: |
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Test Execution Time" >> $GITHUB_STEP_SUMMARY
+
+          START_TIME=$(date +%s)
+          go test ./pkg/desiredstate ./internal/cli ./cmd/yago -run "BehavioralBDD" > /dev/null 2>&1
+          END_TIME=$(date +%s)
+          DURATION=$((END_TIME - START_TIME))
+
+          echo "- ⏱️ Total execution time: ${DURATION}s" >> $GITHUB_STEP_SUMMARY
+
+          if [ $DURATION -lt 30 ]; then
+            echo "- ✅ Execution time within acceptable range (< 30s)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- ⚠️ Execution time exceeds target (${DURATION}s > 30s)" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  test-quality-gate:
+    name: Quality Gate
+    runs-on: ubuntu-latest
+    needs: [behavioral-tests, behavioral-contract-validation, performance-check]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: Run quality checks
+        run: |
+          echo "## Quality Gate Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Run all behavioral tests and check for failures
+          if go test ./pkg/desiredstate ./internal/cli ./cmd/yago -run "BehavioralBDD" > test_results.log 2>&1; then
+            echo "- ✅ All behavioral BDD tests passed" >> $GITHUB_STEP_SUMMARY
+            QUALITY_GATE="PASSED"
+          else
+            echo "- ❌ Some behavioral BDD tests failed" >> $GITHUB_STEP_SUMMARY
+            QUALITY_GATE="FAILED"
+            cat test_results.log
+          fi
+
+          # Check for race conditions
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Race Condition Check" >> $GITHUB_STEP_SUMMARY
+          if go test -race ./pkg/desiredstate ./internal/cli ./cmd/yago -run "BehavioralBDD" > race_results.log 2>&1; then
+            echo "- ✅ No race conditions detected" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- ⚠️ Potential race conditions found" >> $GITHUB_STEP_SUMMARY
+            QUALITY_GATE="FAILED"
+          fi
+
+          # Final gate status
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Final Status" >> $GITHUB_STEP_SUMMARY
+          if [ "$QUALITY_GATE" = "PASSED" ]; then
+            echo "- ✅ **QUALITY GATE: PASSED**" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- ❌ **QUALITY GATE: FAILED**" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi

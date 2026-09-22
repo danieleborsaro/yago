@@ -1,0 +1,72 @@
+---
+# Pre-commit hooks for YAGO (Yet Another GitOps)
+# See https://pre-commit.com for more information
+# Install with: pip install pre-commit && pre-commit install
+
+repos:
+  # General file checks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: \.md$
+      - id: end-of-file-fixer
+      - id: check-yaml
+        args: ['--unsafe'] # Allow custom YAML tags
+      - id: check-json
+      - id: check-toml
+      - id: check-added-large-files
+        args: ['--maxkb=1000']
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: mixed-line-ending
+        args: ['--fix=lf']
+
+  # Security scanning
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.4.0
+    hooks:
+      - id: detect-secrets
+        args: ['--baseline', '.secrets.baseline']
+        exclude: go.sum
+
+  ## Security scanning
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.24.2
+    hooks:
+      - id: gitleaks
+
+  - repo: local
+    hooks:
+      - id: yamlfmt
+        name: yamlfmt
+        entry: yamlfmt
+        language: system
+        types: [yaml]
+
+  # Go linting and formatting
+  - repo: https://github.com/dnephin/pre-commit-golang
+    rev: v0.5.1
+    hooks:
+      - id: go-fmt
+      - id: go-imports
+      - id: go-mod-tidy
+      # - id: golangci-lint
+      - id: go-unit-tests
+
+# # Dockerfile linting
+# - repo: https://github.com/hadolint/hadolint
+#   rev: v2.12.0
+#   hooks:
+#     - id: hadolint-docker
+#       args: [--ignore, DL3008, --ignore, DL3009]
+
+# # Markdown linting
+# - repo: https://github.com/igorshubovych/markdownlint-cli
+#   rev: v0.37.0
+#   hooks:
+#     - id: markdownlint
+#       args: [--fix]
+#       exclude: REWRITE-PLAN.md
+#       # Pinned to avoid nodeenv's "last stable version" lookup, which breaks with older nodeenv releases.
+#       language_version: "20.11.1"

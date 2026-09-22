@@ -1,0 +1,12 @@
+---
+## See: https://yamllint.readthedocs.io/en/stable/configuration.html
+extends: default
+rules:
+  comments:
+    require-starting-space: false
+    min-spaces-from-content: 1
+  indentation:
+    spaces: 2
+    indent-sequences: true
+    check-multi-line-strings: false
+  line-length: disable

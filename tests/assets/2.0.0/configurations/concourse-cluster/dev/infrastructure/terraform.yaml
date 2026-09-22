@@ -1,0 +1,273 @@
+---
+project_properties_env:
+  compliance: cicd
+  role: clstr
+
+custom_tags: {}
+custom_tags_verbatim: {}
+
+keys: {}
+
+remote_states:
+  eu-west-1:
+    vpc:
+      terraform_state:
+        bucket: danieleborsaro-d-devops-dev-inception-statefile-euw1
+        key: CF929C19-21CA-4491-BD30-CDA24DBCCF78.tfstate
+        kms_key_id: a94042a0-458a-4135-ada1-ea11582e47b4
+        region: eu-west-1
+
+    dns-zones:
+      terraform_state:
+        bucket: danieleborsaro-d-devops-dev-inception-statefile-euw1
+        key: devops-dev/dnszones/terraform.tfstate
+        kms_key_id: a94042a0-458a-4135-ada1-ea11582e47b4
+        region: eu-west-1
+
+    persistent_state:
+      terraform_state:
+        bucket: danieleborsaro-d-devops-dev-inception-statefile-euw1
+        key: devops-dev/shared/concourse/state/terraform.tfstate
+        kms_key_id: a94042a0-458a-4135-ada1-ea11582e47b4
+        region: eu-west-1
+
+vpc_output_name: devops
+
+concourse:
+  docker:
+    ecs:
+      nginx:
+        desiredstate_ref: nginx
+
+      concourse:
+        desiredstate_ref: concourse_linux
+
+      bridge_gateway: 172.17.0.1
+
+    ec2:
+      nginx:
+        desiredstate_ref: nginx
+
+      concourse:
+        desiredstate_ref: concourse_linux
+
+      bridge_gateway: 172.17.0.1
+
+  https:
+    ec2:
+      desiredstate_ref: concourse_windows
+
+  monitoring:
+    newrelic:
+      enabled: true
+      account_id: 4304495
+      url: https://insights-collector.eu01.nr-data.net
+      service_prefix: devops_dev_
+      batch_size: 2000
+      batch_duration: 60s
+      is_compression_disabled: false
+
+  cluster:
+    size:
+      ec2:
+        worker_linux:
+          instances:
+            min: 8
+            max: 8
+            desired: 8
+
+          asg:
+            instance_warmup: "180"
+            target_value: "45.0"
+
+        worker_windows:
+          instances:
+            min: 1
+            max: 1
+            desired: 1
+
+          asg:
+            instance_warmup: "180"
+            target_value: "80.0"
+
+        on_demand:
+          base_capacity: "1"
+          percentage_above_base_capacity: "100"
+
+      ecs:
+        atc:
+          service:
+            min: 2
+            max: 4
+            desired: 3
+
+    resources:
+      atc:
+        memory: 4096
+        cpu_units: 2048
+        max_api_connections: 60
+        max_db_connections: 20
+
+  infrastructure:
+    atc:
+      capacity:
+        on_demand:
+          min: 1
+
+      profiling:
+        is_enable_global_resources: true
+        is_provision_efs: false
+        is_use_efs: false
+        is_mount_efs_in_container: false
+        is_enable_volume_peering: false
+        volume_peering_timeout: 8m
+        volume_peering_max_size: 500
+        max_active_tasks_per_worker: 10 ## 0 == no limit
+        max_containers_per_worker: 200
+        max_volumes_per_worker: 600
+        resource_checking_interval: 30s
+        resource_with_webhook_checking_interval: 1m
+
+        ## NB: https://concourse-ci.org/container-placement.html
+        container_placement_strategies:
+          - volume-locality
+          - limit-active-containers
+          - limit-active-volumes
+          - fewest-build-containers
+
+    linux-ec2:
+      size:
+        - c5a.xlarge
+        - m5a.xlarge
+        - c5.xlarge
+
+      ami:
+        desiredstate_ref: concourse_linux
+
+    windows:
+      size:
+        - c5a.xlarge
+        - m5a.xlarge
+        - c5.xlarge
+
+      ami:
+        desiredstate_ref: concourse_windows
+
+    subnets:
+      eu-west-1:
+        name: main_services
+        zone_refs:
+          - eu-west-1a
+          - eu-west-1b
+
+    logging:
+      awslogs_stream_prefix_instance: ""
+      retention_in_days: 30
+      log_level: debug
+
+
+  secrets_manager:
+    custom_path_prefix:
+      domain: secrets/devops-dev/concourse
+      domain_pipelines: secrets/devops-dev/concourse/pipelines
+      templates:
+        team: "{%raw%}{{.Team}}/{{.Secret}}{%endraw%}"
+        pipeline: "{%raw%}{{.Team}}/{{.Pipeline}}/{{.Secret}}{%endraw%}"
+
+  services:
+    ssh:
+      protocol: tcp
+      port: 22
+
+    atc_native:
+      protocol: tcp
+      port: 8080
+
+    atc_plain:
+      protocol: tcp
+      port: 80
+
+    atc_secure:
+      protocol: tcp
+      port: 443
+
+    tsa:
+      protocol: tcp
+      port: 2222
+
+    garden:
+      protocol: tcp
+      port: 7777
+
+    baggagereclaim:
+      protocol: tcp
+      port: 7788
+
+    reaper:
+      protocol: tcp
+      port: 7799
+
+    healthcheck:
+      protocol: tcp
+      port: 8888
+
+  authentication:
+    oidc:
+      is_enabled: true
+
+lb:
+  is_internal: true
+  subnets:
+    eu-west-1:
+      name: main_services
+      zone_refs:
+        - eu-west-1a
+        - eu-west-1b
+
+  security:
+    policy: ELBSecurityPolicy-TLS13-1-2-2021-06
+
+  services:
+    atc_secure:
+      port: 443
+      protocol:
+        sg: tcp
+        lb: TCP
+
+    atc_plain:
+      port: 80
+      protocol:
+        sg: tcp
+        lb: TCP
+
+    tsa:
+      port: 2222
+      protocol:
+        sg: tcp
+        lb: TCP
+
+  timeouts:
+    idle: 30
+    deregistration_delay: 10
+    interval: 6
+    timeout: 5
+    healthy_threshold: 2
+    unhealthy_threshold: 10
+
+  health_check:
+    path: /api/v1/info
+    matcher: "200,302,405"
+
+  logging:
+    log_group:
+      retention_in_days: 180
+
+    log_bucket:
+      intelligent_tiering:
+        transition_in_days: 30
+
+      glacier:
+        transition_in_days: 60
+
+      expiration:
+        expiration_in_days: 180

@@ -1,0 +1,63 @@
+---
+
+concourse:
+  pipelines:
+    configuration:
+      global:
+
+        nexus:
+          repos_url: https://nexus.devops-assets.red101.tech/repository
+
+        ## Same pattern as lambda pipelines: is_skip_tests: 1 skips unit test task (job still runs).
+        ## mode: dockerfile = no SDK tests; sdk = run unit_tests.sdk_command in the SDK image (required, non-empty).
+        unit_tests:
+          is_skip_tests: 0
+          mode: dockerfile
+          sdk_command: ""
+          project: src/UnitTests/UnitTests.csproj
+          github_nuget_source: https://nuget.pkg.github.com/RedCloudTechnology/index.json
+          nexus_nuget_source: https://nexus.devops-assets.red101.tech/repository/nuget-hosted/index.json
+
+        notifications:
+          msteams:
+            ## NB: https://github.com/navicore/teams-notification-resource
+            version: latest
+            icons:
+              bomb: &icon_bomb "" # "u+1F4A3 "
+              thumbsup: &icon_thumbsup "" # "u+1F44D "
+              partypopper: &icon_partypopper "" # "u+1F389 "
+
+            alert:
+              url: ((webhooks_alert_msteams))
+              params_task:
+                title: !join [*icon_bomb, 'Task in *$BUILD_TEAM_NAME::$BUILD_PIPELINE_NAME::$BUILD_JOB_NAME* **FAILED**']
+                style: attention
+                actionName: $BUILD_PIPELINE_NAME
+                actionTarget: $ATC_EXTERNAL_URL/teams/$BUILD_TEAM_NAME/pipelines/$BUILD_PIPELINE_NAME/jobs/$BUILD_JOB_NAME/builds/$BUILD_NAME
+
+              params_job:
+                title: !join [*icon_bomb, 'Job *$BUILD_TEAM_NAME::$BUILD_PIPELINE_NAME::$BUILD_JOB_NAME* **FAILED**']
+                style: attention
+                actionName: $BUILD_PIPELINE_NAME
+                actionTarget: $ATC_EXTERNAL_URL/teams/$BUILD_TEAM_NAME/pipelines/$BUILD_PIPELINE_NAME/jobs/$BUILD_JOB_NAME/builds/$BUILD_NAME
+
+            warning:
+              url: ((webhooks_notification_msteams))
+              params_pipeline:
+                title: !join [*icon_partypopper, 'Pipeline *$BUILD_TEAM_NAME::$BUILD_PIPELINE_NAME* **OK**']
+                style: good
+                actionName: $BUILD_PIPELINE_NAME
+                actionTarget: $ATC_EXTERNAL_URL/teams/$BUILD_TEAM_NAME/pipelines/$BUILD_PIPELINE_NAME
+
+        statistics:
+          dora:
+            metrics_enambled: [build-start, build-failed, build-ok, deployment-start, deployment-failed, deployment-ok]
+
+            url: https://dora.red101.tech
+
+        workers:
+          check:
+            start: 7:01 AM
+            stop: 6:59 PM
+            interval: 5m
+            location: UTC

@@ -1,0 +1,21 @@
+---
+schema: 4.2.0
+desiredstate:
+  meta:
+    repo: &desiredstate_default
+      url: git@github.com:RedCloudTechnology/gitops-desiredstates-shared.git
+      branch: main
+      tag: ''
+      watch:
+        - tests/assets/4.2.0/desiredstates/concourse-cluster/{**,.}/*
+        # - cicd/concourse-dev/devops-dev/secrets/validate/{**,.}/*
+
+    parts:
+      self: tests/assets/4.2.0/desiredstates/concourse-cluster/desiredstate.yaml
+      terraform: tests/assets/4.2.0/desiredstates/concourse-cluster/terraform/terraform.yaml
+      concourse: tests/assets/4.2.0/desiredstates/concourse-cluster/concourse/concourse.yaml
+
+    # ecosystem:
+    #   secret-validation:
+    #     <<: *desiredstate_default
+    #     path: cicd/concourse-dev/devops-dev/secrets/validate/desiredstate.yaml

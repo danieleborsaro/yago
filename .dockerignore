@@ -1,0 +1,49 @@
+# Binaries
+yago
+yago_unix
+yago-*
+
+# Test files
+*.test
+coverage.out
+coverage.html
+
+# Temporary files
+*.tmp
+*.swp
+*.swo
+*~
+
+# IDE files
+.vscode/
+.idea/
+*.iml
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+
+# Documentation
+*.md
+docs/
+
+# Docker
+Dockerfile*
+.dockerignore
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+Jenkinsfile
+
+# Build artifacts
+bin/
+dist/
+build/
+
+# Logs
+*.log

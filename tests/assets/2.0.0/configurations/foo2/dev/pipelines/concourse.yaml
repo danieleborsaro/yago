@@ -1,0 +1,11 @@
+---
+concourse:
+  pipelines:
+    concourse:
+      name: check-workers-foo2
+      template: pipelines/check-workers-and-tools.yaml
+      repo: desiredstate.content.components.sourcecode.pipelines
+      team: master
+      region: eu-west-1
+
+    configuration: {}

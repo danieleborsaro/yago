@@ -1,0 +1,134 @@
+// +build example
+
+// This is an EXAMPLE handler to demonstrate extensibility.
+// To use it, remove the ".example" extension and the build tag above.
+
+package composer
+
+import (
+"fmt"
+"strings"
+
+"github.com/danieleborsaro/yago/internal/utils/errors"
+"github.com/danieleborsaro/yago/internal/utils/logging"
+"github.com/danieleborsaro/yago/pkg/desiredstate"
+)
+
+// ComponentTypeComposer is the component type identifier for Composer packages.
+const ComponentTypeComposer desiredstate.ComponentType = "composer"
+
+// ComposerHandler implements ComponentTypeHandler for Composer/Packagist packages.
+type ComposerHandler struct {
+desiredstate.BaseComponentHandler
+}
+
+// NewComposerHandler creates a new Composer handler instance.
+func NewComposerHandler() *ComposerHandler {
+return &ComposerHandler{}
+}
+
+// Type returns the component type this handler manages.
+func (h *ComposerHandler) Type() desiredstate.ComponentType {
+return ComponentTypeComposer
+}
+
+// ParseComponent parses a Composer component from YAML data.
+func (h *ComposerHandler) ParseComponent(data map[string]interface{}, partID, partFile string) (*desiredstate.VersionedComponent, error) {
+comp := &desiredstate.VersionedComponent{
+ partFile,
+   partID,
+      ComponentTypeComposer,
+"@",
+tifier: "*",
+ true,
+ make(map[string]interface{}),
+}
+
+// Extract package name (required)
+packageName, err := desiredstate.ParseYAMLString(data, "package", true)
+if err != nil {
+ nil, errors.Wrapf(errors.ErrParse, err, "Composer component must have 'package' field")
+}
+
+// Validate package name format (vendor/package)
+if !strings.Contains(packageName, "/") {
+ nil, errors.New(errors.ErrParse, "Composer package name must be in 'vendor/package' format")
+}
+
+comp.URL = fmt.Sprintf("https://packagist.org/packages/%s", packageName)
+comp.Metadata["package"] = packageName
+
+// Extract version constraint (optional)
+version, _ := desiredstate.ParseYAMLString(data, "version", false)
+if version != "" {
+ = version
+e if version is locked (exact version vs constraint)
+!strings.ContainsAny(version, "^~*<>=|")
+} else {
+ = "*"
+false
+}
+
+logging.Debug("Parsed Composer component: %s", partID)
+return comp, nil
+}
+
+// ResolveVersion resolves a version constraint to an exact version.
+func (h *ComposerHandler) ResolveVersion(comp *desiredstate.VersionedComponent, ctx *desiredstate.ResolveContext) (string, error) {
+if comp.IsLocked {
+ comp.Version, nil
+}
+
+logging.Warn("Composer version resolution is a placeholder - TODO: integrate Packagist API")
+
+// Placeholder: just return constraint as-is
+return comp.Version, nil
+}
+
+// CompareVersions compares two Composer package versions.
+func (h *ComposerHandler) CompareVersions(v1, v2 string) (int, error) {
+// Use semantic version comparison
+return desiredstate.CompareSemanticVersions(v1, v2)
+}
+
+// LockVersion locks a component to a specific version.
+func (h *ComposerHandler) LockVersion(comp *desiredstate.VersionedComponent, version string) error {
+comp.Version = version
+comp.IsLocked = true
+logging.Info("Locked Composer package %s to version %s", comp.Metadata["package"], version)
+return nil
+}
+
+// UnlockVersion unlocks a component from a specific version.
+func (h *ComposerHandler) UnlockVersion(comp *desiredstate.VersionedComponent) error {
+comp.IsLocked = false
+logging.Info("Unlocked Composer package %s", comp.Metadata["package"])
+return nil
+}
+
+// ValidateComponent validates a Composer component configuration.
+func (h *ComposerHandler) ValidateComponent(comp *desiredstate.VersionedComponent) error {
+packageName, ok := comp.Metadata["package"].(string)
+if !ok || packageName == "" {
+ errors.New(errors.ErrValidation, "Composer component missing package name")
+}
+
+if !strings.Contains(packageName, "/") {
+ errors.New(errors.ErrValidation, "Composer package name must be in 'vendor/package' format")
+}
+
+if comp.Version == "" {
+ errors.New(errors.ErrValidation, "Composer component missing version")
+}
+
+logging.Debug("Validated Composer component: %s@%s", packageName, comp.Version)
+return nil
+}
+
+// init registers the Composer handler on package initialization.
+func init() {
+handler := NewComposerHandler()
+if err := desiredstate.RegisterComponentHandler(handler); err != nil {
+g.Error("Failed to register Composer handler: %v", err)
+}
+}

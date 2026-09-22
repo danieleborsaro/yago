@@ -1,0 +1,8 @@
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Files with hashed (not raw) secrets, not real credentials"
+paths = [
+  '''\.secrets\.baseline''',
+]

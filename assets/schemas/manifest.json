@@ -1,0 +1,34 @@
+{
+  "manifest": {
+    "name": "GitOps Core Schemas",
+    "description": "Core GitOps desiredstate and configuration schemas",
+    "version": "1.0.0",
+    "namespace": "yago"
+  },
+  "schemas": [
+    {
+      "version": "1.0.0",
+      "kind": "DesiredState",
+      "file": "1.0.0-desiredstate.json",
+      "description": "Basic GitOps desiredstate schema v1.0.0"
+    },
+    {
+      "version": "1.0.0",
+      "kind": "Configuration",
+      "file": "1.0.0-configuration.json",
+      "description": "Basic GitOps configuration schema v1.0.0"
+    },
+    {
+      "version": "2.0.0",
+      "kind": "DesiredState",
+      "file": "2.0.0-desiredstate.json",
+      "description": "GitOps desiredstate schema v2.0.0 - git-nested repo, orchestration replaces ecosystem, components promoted to root level"
+    },
+    {
+      "version": "2.0.0",
+      "kind": "Configuration",
+      "file": "2.0.0-configuration.json",
+      "description": "GitOps configuration schema v2.0.0 - free-named wrappers with explicit type field"
+    }
+  ]
+}

@@ -1,0 +1,46 @@
+---
+schema: 2.0.0
+namespace: yago
+kind: DesiredState
+desiredstate:
+  meta:
+    is_override_schema_in_config: true
+    repo: &desiredstate_default
+      git:
+        url: git@github.com:danieleborsaro/yago.git
+        branch: main
+        tag: ''
+        watch:
+          - tests/assets/2.0.0/desiredstates/concourse-cluster/{**,.}/*
+
+    ## NB: this could be removed and just load+assemble the entire subtree by default
+    ##     there sould be no need to refrence ouside the three from here
+    ##     ohrwise yes we need a parts section for that (maybe just for lsting outside files)
+    parts:
+      self: tests/assets/2.0.0/desiredstates/concourse-cluster/desiredstate.yaml
+      infrastructure: tests/assets/2.0.0/desiredstates/concourse-cluster/infrastructure.yaml
+      application: tests/assets/2.0.0/desiredstates/concourse-cluster/application.yaml
+      pipelines: tests/assets/2.0.0/desiredstates/concourse-cluster/pipelines.yaml
+
+    orchestration:
+      foo:
+        git: &orchestration_default
+          url: git@github.com:danieleborsaro/yago.git
+          branch: main
+          tag: ''
+          path: tests/assets/2.0.0/desiredstates/foo/desiredstate.yaml
+          watch:
+            - tests/assets/2.0.0/desiredstates/foo/desiredstate.yaml
+
+      foo2:
+        git:
+          !!merge <<: *orchestration_default
+          path: tests/assets/2.0.0/desiredstates/foo2/desiredstate.yaml
+          watch:
+            - tests/assets/2.0.0/desiredstates/foo2/desiredstate.yaml
+
+    # pipelines_as_code:
+    #   self:
+    #     is_self_updating: true
+
+    #   children: []

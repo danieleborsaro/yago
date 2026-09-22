@@ -1,0 +1,17 @@
+---
+desiredstate:
+  content:
+    components:
+      sourcecode:
+        pipelines-default: &pipelines_default
+          url: git@github.com:danieleborsaro/yago.git
+          branch: main
+          tag: ""
+          path: !!str .
+          watch:
+            - ./{**,.}/*
+
+        pipelines:
+          !!merge <<: *pipelines_default
+
+      artifacts: {}

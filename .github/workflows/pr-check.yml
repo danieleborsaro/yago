@@ -1,0 +1,47 @@
+---
+name: PR Quality Check
+
+on:
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  quick-test:
+    name: Quick Behavioral BDD Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+
+      - name: Run behavioral BDD tests
+        run: |
+          set -e
+          echo "🧪 Running behavioral BDD tests..."
+          go test -v -race ./pkg/desiredstate ./internal/cli ./cmd/yago -run "BehavioralBDD"
+
+      - name: Test summary
+        if: success()
+        run: |
+          echo "## ✅ Behavioral BDD Tests Passed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "All behavioral contracts validated successfully." >> $GITHUB_STEP_SUMMARY
+          echo "- Parser layer: ✅" >> $GITHUB_STEP_SUMMARY
+          echo "- Service layer: ✅" >> $GITHUB_STEP_SUMMARY
+          echo "- CLI layer: ✅" >> $GITHUB_STEP_SUMMARY
+          echo "- Integration layer: ✅" >> $GITHUB_STEP_SUMMARY
+          echo "- Workflow layer: ✅" >> $GITHUB_STEP_SUMMARY
+
+      - name: Failure summary
+        if: failure()
+        run: |
+          echo "## ❌ Behavioral BDD Tests Failed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Please review the test failures above and ensure all behavioral contracts pass." >> $GITHUB_STEP_SUMMARY

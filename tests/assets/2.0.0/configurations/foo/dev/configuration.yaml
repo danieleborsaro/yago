@@ -1,0 +1,18 @@
+---
+schema: 2.0.0
+namespace: yago
+kind: Configuration
+configuration:
+  meta:
+    parts:
+      self: tests/assets/2.0.0/configurations/foo/dev/configuration.yaml
+
+      ## NB: the alternative is to list here extra files from outside the three
+      ##     and always load the entire subtree+extra files regardless of the wrapper
+      ##     what happens if a wrapper complains about non declared variables?
+      ##     ow to handle files that only need to be referenced but not loded/assembled?
+
+  wrappers:
+    concourse:
+      parts:
+        concourse: tests/assets/2.0.0/configurations/foo/dev/pipelines/concourse.yaml

@@ -1,0 +1,85 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "title": "Custom Organization GitOps Schema",
+  "description": "Custom GitOps schema with organization-specific extensions",
+  "version": "1.0.0-custom",
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "description": "API version of the GitOps document",
+      "pattern": "^(custom\\.org\\.io/)?v?1\\.(0|\\d+)\\.(0|\\d+)-custom$",
+      "examples": ["1.0.0-custom", "custom.org.io/v1.0.0-custom"]
+    },
+    "kind": {
+      "type": "string",
+      "description": "Type of GitOps resource",
+      "enum": ["DesiredState", "Configuration"]
+    },
+    "metadata": {
+      "type": "object",
+      "description": "Metadata for the GitOps resource",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Name of the resource",
+          "minLength": 1
+        },
+        "namespace": {
+          "type": "string",
+          "description": "Namespace for the resource",
+          "default": "default"
+        },
+        "costCenter": {
+          "type": "string",
+          "description": "Organization cost center (custom field)",
+          "pattern": "^CC-[0-9]{4}$"
+        },
+        "businessUnit": {
+          "type": "string",
+          "description": "Business unit (custom field)",
+          "enum": ["engineering", "marketing", "sales", "operations"]
+        }
+      },
+      "required": ["name", "costCenter", "businessUnit"]
+    },
+    "spec": {
+      "type": "object",
+      "description": "Specification of the desired state with custom extensions",
+      "properties": {
+        "environment": {
+          "type": "string",
+          "description": "Target environment",
+          "enum": ["development", "staging", "production", "sandbox", "demo"]
+        },
+        "configType": {
+          "type": "string",
+          "description": "Type of configuration",
+          "enum": ["properties", "yaml", "json"]
+        },
+        "data": {
+          "type": "object",
+          "description": "Configuration data",
+          "additionalProperties": true
+        },
+        "compliance": {
+          "type": "object",
+          "description": "Compliance settings (custom field)",
+          "properties": {
+            "gdprCompliant": {
+              "type": "boolean",
+              "description": "GDPR compliance flag"
+            },
+            "dataClassification": {
+              "type": "string",
+              "enum": ["public", "internal", "confidential", "restricted"]
+            }
+          },
+          "required": ["gdprCompliant", "dataClassification"]
+        }
+      },
+      "required": ["compliance"]
+    }
+  },
+  "required": ["schemaVersion", "kind", "metadata", "spec"]
+}

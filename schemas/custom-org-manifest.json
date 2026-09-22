@@ -1,0 +1,16 @@
+{
+  "manifest": {
+    "name": "Custom Organization Schemas",
+    "description": "Extended schemas with organization-specific fields",
+    "version": "1.0.0",
+    "namespace": "custom-org"
+  },
+  "schemas": [
+    {
+      "version": "1.0.0-custom",
+      "kind": "DesiredState",
+      "file": "custom-org-v1.0.0-custom-desiredstate.json",
+      "description": "Custom organizational GitOps schema with company-specific fields"
+    }
+  ]
+}

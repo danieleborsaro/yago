@@ -1,0 +1,15 @@
+---
+packer_tools:
+  eu-west-1:
+    iam_profile_name: D-devops-dev-packer-Tools-Build-Instance-euw1-612017fad03d9c9316
+    security_group_name: D-devops-dev-packer-Tools-S3-79d4788909b6f47d937ea6fd9bdf444c660374c7
+    ssh_key_pair_linux_name: D-devops-dev-packer-keypair-Tools-Linux-euw1-fd1aeef228ce6f5782204bf2627c5209f0c6fcf0
+    ssh_key_pair_windows_name: D-devops-dev-packer-keypair-Tools-Windows-euw1-56c6c53cccf955cf7d93726c0a9b973694384b95
+    subnet_name: D-devops-dev-vpc-subnet-Services-euw1a
+    repos:
+      default_bucket:
+        name: redcloud-d-devops-dev-packer-tools-packages-euw1
+        region: eu-west-1
+      # codedeploy_bucket:
+      #   name: aws-codedeploy-eu-west-1
+      #   region: eu-west-1

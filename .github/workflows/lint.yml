@@ -1,0 +1,143 @@
+---
+name: Linting
+
+on:
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - '**.go'
+      - '**.yaml'
+      - '**.yml'
+      - '.golangci.yml'
+      - '.yamllint.yml'
+      - '.pre-commit-config.yaml'
+
+jobs:
+  go-lint:
+    name: Go Linting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version-file: go.mod
+
+      - name: Cache Go modules
+        uses: actions/cache@v3
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v3
+        with:
+          version: latest
+          args: --timeout=5m --new-from-rev=origin/main
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Check go fmt
+        run: |
+          if [ "$(gofmt -s -l . | wc -l)" -gt 0 ]; then
+            echo "❌ The following files are not formatted:"
+            gofmt -s -l .
+            echo "Please run 'gofmt -s -w .' to format your code."
+            exit 1
+          fi
+          echo "✅ All Go files are properly formatted"
+
+      - name: Check go imports
+        run: |
+          go install golang.org/x/tools/cmd/goimports@latest
+          if [ "$(goimports -l . | wc -l)" -gt 0 ]; then
+            echo "❌ The following files have import issues:"
+            goimports -l .
+            echo "Please run 'goimports -w .' to fix imports."
+            exit 1
+          fi
+          echo "✅ All imports are properly organized"
+
+      - name: Run go mod tidy check
+        run: |
+          go mod tidy
+          if [ "$(git diff --name-only)" ]; then
+            echo "❌ go.mod or go.sum is not tidy"
+            git diff
+            echo "Please run 'go mod tidy' and commit the changes."
+            exit 1
+          fi
+          echo "✅ go.mod and go.sum are tidy"
+
+  yaml-lint:
+    name: YAML Linting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install yamllint
+        run: pip install yamllint
+
+      - name: Run yamllint
+        run: |
+          echo "🔍 Running yamllint..."
+          yamllint --format github .
+          echo "✅ YAML linting passed"
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version-file: go.mod
+
+      - name: Run Gosec Security Scanner
+        uses: securecodewarrior/github-action-gosec@master
+        with:
+          args: './...'
+
+  pre-commit:
+    name: Pre-commit hooks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version-file: go.mod
+
+      - name: Install pre-commit
+        run: pip install pre-commit
+
+      - name: Cache pre-commit hooks
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
+
+      - name: Run pre-commit
+        run: pre-commit run --all-files --show-diff-on-failure

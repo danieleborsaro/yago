@@ -1,0 +1,9 @@
+---
+users:
+  - name: daniele
+    ssh_authorized_keys:
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMm8Rs/C+4tbE/EndQLqsv7o6xzUgVM+aI7AThtx/Dgo daniele
+
+  - name: kier
+    ssh_authorized_keys:
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEwa4Mw8UJkehp8yhDLs5GA6bsnl8MC+o0fofJhAANKi kier

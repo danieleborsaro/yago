@@ -1,0 +1,22 @@
+{
+  "manifest": {
+    "name": "Test Custom Paths Schema",
+    "description": "Test schema with custom property paths for unit testing",
+    "version": "1.0.0",
+    "namespace": "test-custom-paths"
+  },
+  "schemas": [
+    {
+      "version": "1.0.0",
+      "kind": "DesiredState",
+      "file": "test-custom-paths-v1.0.0-desiredstate-meta.json",
+      "description": "Test schema demonstrating custom property paths"
+    },
+    {
+      "version": "1.0.0",
+      "kind": "Configuration",
+      "file": "test-custom-paths-v1.0.0-configuration-meta.json",
+      "description": "Test schema demonstrating custom property paths"
+    }
+  ]
+}

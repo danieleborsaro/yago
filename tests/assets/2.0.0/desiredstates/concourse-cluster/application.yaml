@@ -1,0 +1,66 @@
+---
+desiredstate:
+  components:
+    terraform:
+      git:
+        url: git@github.com:RedCloudTechnology/tf-root-concourse-cluster.git
+        branch: ""
+        tag: !!str 20260515.1
+        path: .
+        watch:
+          - ./{**,.}/*
+
+    yago:
+      git:
+        url: git@github.com:danieleborsaro/yago.git
+        branch: main
+        tag: ""
+        path: .
+        watch:
+          - ./{**,.}/*
+
+      docker:
+        eu-west-1:
+          image: danieleborsaro/yago
+          tag: 2.0.0
+
+  configuration:
+    dev:
+      default: &config_default_dev
+        git:
+          url: git@github.com:danieleborsaro/yago.git
+          branch: main
+          tag: ""
+          path: tests/assets/2.0.0/configurations/concourse-cluster/dev/configuration.yaml
+          watch:
+            - tests/assets/2.0.0/configurations/concourse-cluster/{**,.}/*
+
+      terraform:
+        !!merge <<: *config_default_dev
+
+
+    pre:
+      default: &config_default_pre
+        git:
+          url: git@github.com:danieleborsaro/yago.git
+          branch: main
+          tag: ""
+          path: tests/assets/2.0.0/configurations/concourse-cluster/pre/configuration.yaml
+          watch:
+            - tests/assets/2.0.0/configurations/concourse-cluster/pre/{**,.}/*
+
+      terraform:
+        !!merge <<: *config_default_pre
+
+    prod:
+      default: &config_default_prod
+        git:
+          url: git@github.com:danieleborsaro/yago.git
+          branch: main
+          tag: ""
+          path: tests/assets/2.0.0/configurations/concourse-cluster/prod/configuration.yaml
+          watch:
+            - tests/assets/2.0.0/configurations/concourse-cluster/prod/{**,.}/*
+
+      terraform:
+        !!merge <<: *config_default_prod

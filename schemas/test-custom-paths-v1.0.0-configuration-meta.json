@@ -1,0 +1,12 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://gitops.example.com/schemas/test-custom-paths/configuration-meta.json",
+  "title": "Test Schema Configuration Meta",
+  "description": "Configuration meta schema for testing",
+  "type": "object",
+  "properties": {
+    "meta": {
+      "type": "object"
+    }
+  }
+}

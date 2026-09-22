@@ -1,0 +1,8 @@
+{
+  "manifest": {
+    "name": "Missing Namespace Manifest",
+    "description": "This manifest is missing the namespace field",
+    "version": "1.0.0"
+  },
+  "schemas": []
+}

@@ -1,0 +1,27 @@
+---
+schema: 4.2.0
+configuration:
+  meta:
+    parts:
+      self: tests/assets/4.2.0/configurations/concourse-cluster/configuration.yaml
+
+  content:
+    wrappers:
+      concourse:
+        parts:
+          self: tests/assets/4.2.0/configurations/concourse-cluster/concourse/concourse.yaml
+          global: tests/assets/shared/global/concourse.yaml
+          pipelines: tests/assets/shared/global/pipelines.yaml
+
+      terraform:
+        backends:
+          eu-west-1: tests/assets/4.2.0/configurations/concourse-cluster/terraform/backends/eu-west-1.tfvars.json
+
+        parts:
+          global: tests/assets/shared/global/project-properties.yaml
+          eco: tests/assets/shared/devops-dev/project-properties.yaml
+          proj: tests/assets/4.2.0/configurations/concourse-cluster/concourse/project-properties-shared.yaml
+          env: tests/assets/4.2.0/configurations/concourse-cluster/concourse/project-properties-env.yaml
+          self: tests/assets/4.2.0/configurations/concourse-cluster/terraform/terraform.yaml
+          secrets: tests/assets/4.2.0/configurations/concourse-cluster/concourse/secrets-cluster.yaml
+          users: tests/assets/shared/global/linux-users.yaml

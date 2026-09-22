@@ -1,0 +1,10 @@
+{
+  "defaultSchemaPath": "schemas",
+  "customSchemaPaths": [
+    "/opt/yago/schemas",
+    "~/.yago/schemas",
+    "./project-schemas"
+  ],
+  "enablePlugins": true,
+  "cacheSchemas": true
+}

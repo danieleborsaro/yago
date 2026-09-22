@@ -1,0 +1,44 @@
+---
+desiredstate:
+  components:
+    nginx:
+      docker:
+        # type: docker
+        # properties:
+        eu-west-1:
+          image: nginx
+          tag: 1.29.1
+
+    concourse_linux:
+      docker:
+        # type: docker
+        # properties:
+        eu-west-1:
+          image: concourse/concourse
+          tag: 7.13.1
+
+      ami:
+        # type: ami
+        # properties:
+        eu-west-1:
+          owner: amazon
+          name: amzn2-ami-kernel-5.10-hvm-2.0.20250707.0-x86_64-gp2 ## Amazon linux 2
+          platform: linux
+
+    concourse_windows:
+      web:
+        # type: uri
+        # properties:
+        eu-west-1:
+          uri: https://github.com/concourse/concourse/releases/download/v7.13.1/concourse-7.13.1-windows-amd64.zip
+
+      ami:
+        # type: ami
+        # properties:
+        eu-west-1:
+          owner: amazonaws
+          name: BIOS-Windows_Server-2025-English-Full-Base
+          platform: windows
+
+  tools:
+    terraform: !!str 1.13

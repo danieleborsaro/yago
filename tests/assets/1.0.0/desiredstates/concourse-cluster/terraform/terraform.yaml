@@ -1,0 +1,62 @@
+---
+desiredstate:
+  content:
+    components:
+      sourcecode:
+        terraform:
+          url: git@github.com:danieleborsaro/yago.git
+          branch: main
+          tag: ""
+          path: .
+          watch:
+            - ./{**,.}/*
+
+      artifacts:
+        nginx:
+          docker:
+            eu-west-1:
+              image: nginx
+              tag: 1.29.1
+
+        concourse_linux:
+          docker:
+            eu-west-1:
+              image: concourse/concourse
+              tag: 7.13.1
+
+          ami:
+            eu-west-1:
+              owner: amazon
+              name: amzn2-ami-kernel-5.10-hvm-2.0.20250707.0-x86_64-gp2 ## Amazon linux 2
+              platform: linux
+
+        concourse_windows:
+          web:
+            eu-west-1:
+              uri: https://github.com/concourse/concourse/releases/download/v7.13.1/concourse-7.13.1-windows-amd64.zip
+
+          ami:
+            eu-west-1:
+              owner: amazonaws
+              name: BIOS-Windows_Server-2025-English-Full-Base
+              platform: windows
+
+      tools:
+        terraform: !!str 1.13
+
+    environments:
+      dev:
+        configurations:
+          default: &config_default
+            url: git@github.com:danieleborsaro/yago.git
+            branch: main
+            tag: ""
+            path: tests/assets/1.0.0/concourse-cluster/configurations/configuration.yaml
+            watch:
+              - tests/assets/1.0.0/concourse-cluster/configurations/{**,.}/*
+
+          terraform:
+            !!merge <<: *config_default
+
+          concourse:
+            !!merge <<: *config_default

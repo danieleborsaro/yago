@@ -1,0 +1,17 @@
+---
+desiredstate:
+  content:
+    components:
+      sourcecode:
+        pipelines-default: &pipelines_default
+          url: git@github.com:RedCloudTechnology/cci-pipelines-shared.git
+          branch: main
+          tag: !!str 20260421.1
+          path: !!str .
+          watch:
+            - ./{**,.}/*
+
+        pipelines:
+          !!merge <<: *pipelines_default
+
+      artifacts: {}
