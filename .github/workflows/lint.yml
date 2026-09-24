@@ -9,7 +9,7 @@ on:
       - '**.yaml'
       - '**.yml'
       - '.golangci.yml'
-      - '.yamllint.yml'
+      - '.yamllint.yaml'
       - '.pre-commit-config.yaml'
 
 jobs:
@@ -38,10 +38,11 @@ jobs:
         run: go mod download
 
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v3
+        # golangci-lint v2 needs v7 or later of the action.
+        uses: golangci/golangci-lint-action@v9
         with:
-          version: latest
-          args: --timeout=5m --new-from-rev=origin/main
+          version: v2.13.2
+          args: --new-from-rev=origin/main
 
       - name: Run go vet
         run: go vet ./...

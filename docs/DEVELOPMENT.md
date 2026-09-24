@@ -30,7 +30,7 @@ This document describes how to set up the development environment for YAGO, incl
    make pre-commit-install
    
    # Install linting tools
-   go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+   go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
    pip install yamllint
    ```
 
@@ -48,14 +48,7 @@ This document describes how to set up the development environment for YAGO, incl
 
 ### Go Linting
 
-YAGO uses **golangci-lint** with a comprehensive configuration that includes 20+ linters:
-
-- **Code Quality**: gocyclo, gocognit, nestif (complexity analysis)
-- **Bug Detection**: govet, errcheck, gosimple, staticcheck
-- **Style Enforcement**: gofmt, goimports, misspell, whitespace
-- **Security**: gosec, G101-G602 security rules
-- **Performance**: prealloc (slice preallocation)
-- **Maintainability**: funlen, gocognit (function complexity)
+YAGO uses **golangci-lint** v2 with the standard linters (errcheck, govet, ineffassign, staticcheck, unused) and the gofmt and goimports formatters. The existing code still has findings, so CI only reports issues that are new since `origin/main`. gosec runs separately (`make security-scan`).
 
 **Configuration**: `.golangci.yml`
 
@@ -66,7 +59,7 @@ YAGO uses **golangci-lint** with a comprehensive configuration that includes 20+
 make lint-go
 
 # Run specific linter
-golangci-lint run --disable-all --enable=gosec
+golangci-lint run --default=none --enable=gosec
 
 # Auto-fix issues
 make lint-fix
@@ -82,7 +75,7 @@ YAGO uses **yamllint** optimized for GitOps configurations:
 - **Document Structure**: Single document per file
 - **Key Ordering**: Disabled (flexibility for GitOps manifests)
 
-**Configuration**: `.yamllint.yml`
+**Configuration**: `.yamllint.yaml`
 
 **Usage**:
 
