@@ -70,7 +70,7 @@ Defines the list of supported wrapper types for a schema version. Wrappers are c
 
 ### Embedded vs External Schemas
 
-**Embedded Schemas** (`assets/schemas/gitops/`):
+**Embedded Schemas** (`assets/schemas/`):
 
 - Compiled into the Go binary
 - Used as fallback when external schemas are unavailable
