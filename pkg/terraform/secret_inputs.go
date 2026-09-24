@@ -27,7 +27,7 @@ type secretInputManifest struct {
 func cacheSecretInputs(configPath, buildDir, profile, region string, generateJSON bool) error {
 	manifest := secretInputManifest{Version: 1, AWSProfile: profile, AWSRegion: region}
 	if configPath != "" {
-		data, err := os.ReadFile(configPath)
+		data, err := os.ReadFile(filepath.Clean(configPath))
 		if err != nil {
 			return err
 		}
@@ -81,7 +81,7 @@ func writeSecretManifest(path string, manifest secretInputManifest) error {
 
 func readSecretManifest(path string) (secretInputManifest, error) {
 	manifest := secretInputManifest{Version: 1}
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(filepath.Clean(path))
 	if os.IsNotExist(err) {
 		return manifest, nil
 	}

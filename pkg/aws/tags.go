@@ -16,7 +16,7 @@ import (
 // Ported from terraform-provider-awstagging (pkg/tagging/core at 04f0301), which needs Go 1.27.1 so can't be imported.
 
 const (
-	ResourceTypeSecret = "AWS::SecretsManager::Secret"
+	ResourceTypeSecret = "AWS::SecretsManager::Secret" //nolint:gosec // a resource type, not a credential
 	ResourceTypeKmsKey = "AWS::KMS::Key"
 )
 

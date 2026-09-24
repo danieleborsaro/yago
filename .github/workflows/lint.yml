@@ -104,6 +104,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@v4
@@ -111,9 +113,10 @@ jobs:
           go-version-file: go.mod
 
       - name: Run Gosec Security Scanner
-        uses: securecodewarrior/github-action-gosec@master
+        uses: golangci/golangci-lint-action@v9
         with:
-          args: './...'
+          version: v2.13.2
+          args: --default=none --enable=gosec --tests=false --new-from-rev=origin/main
 
   pre-commit:
     name: Pre-commit hooks
