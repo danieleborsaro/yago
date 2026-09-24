@@ -4,7 +4,7 @@ This document describes how to set up the development environment for YAGO, incl
 
 ## Prerequisites
 
-- **Go 1.23+**: For building and running the application
+- **Go 1.27.1+**: For building and running the application
 - **Python 3.8+**: For pre-commit hooks and yamllint
 - **Git**: For version control and pre-commit integration
 
