@@ -105,6 +105,13 @@ func TestParseSecrets_Region(t *testing.T) {
 	}
 }
 
+func TestParseSecrets_OnlyChecksTheAliasOfSecretsCreatedHere(t *testing.T) {
+	content := "secrets:\n  eu-west-1:\n    a:\n      name: example/user@example.com\n    b:\n      name: example/user-example.com\n"
+	if _, err := ParseSecrets(parseConfiguration(t, content)); err != nil {
+		t.Fatalf("expected secrets read from elsewhere to need no KMS alias, got %v", err)
+	}
+}
+
 func TestParseSecrets_WithoutASecretsBlock(t *testing.T) {
 	secrets, err := ParseSecrets(map[string]interface{}{"workspace": "example"})
 	if err != nil || len(secrets) != 0 {
@@ -185,6 +192,22 @@ func TestParseSecrets_RejectsInvalidSecrets(t *testing.T) {
 			name:    "unknown permission",
 			content: "secrets:\n  eu-west-1:\n    a:\n      name: example/a\n      permissions:\n        restrict_to_everyone: true\n",
 			want:    "restrict_to_everyone",
+		},
+		{
+			name:    "group permission",
+			content: "secrets:\n  eu-west-1:\n    a:\n      name: example/a\n      permissions:\n        restrict_to_groups: [admins]\n",
+			want:    "restrict_to_groups can't be enforced",
+		},
+		{
+			name:    "name KMS can't use in an alias",
+			content: "secrets:\n  eu-west-1:\n    a:\n      is_created_here: true\n      name: example/user@example.com\n",
+			want:    "KMS aliases may only use",
+		},
+		{
+			name: "shared KMS alias",
+			content: "secrets:\n  eu-west-1:\n    a:\n      is_created_here: true\n      name: example/app.database\n" +
+				"    b:\n      is_created_here: true\n      name: example/app-database\n",
+			want: `"alias/example/app-database" is also the alias of a`,
 		},
 	}
 

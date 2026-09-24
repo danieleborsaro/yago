@@ -149,12 +149,20 @@ secrets:
       keys:                       # the fields of the secret's JSON value; none means plain text
         username_path: username
         certificate_path: certificate_b64
-      permissions:                # optional: a resource policy restricting the secret
-        restrict_to_roles: [my-app]
+      permissions:                # optional: only these principals can read or change the secret
+        restrict_to_roles: [my-app, my-deployer]
 ```
 
 To add a secret: add it with `is_created_here: true`, run `plan` then `create`, set its real value in Secrets Manager,
 record the new version ID under `versions`, then run `validate`.
+
+`permissions` gives a secret created here a resource policy that denies reading, changing and deleting the secret, and
+changing its policy, to every principal not in `restrict_to_users`, `restrict_to_roles`, `restrict_to_assumed_roles`
+or `restrict_to_sso_policies` (permission set names). `extra_policy_statements` are added to the policy as they are.
+List whoever runs yago and reads the secret, such as the Terraform role: anyone else loses access, and only a listed
+principal can change the policy. `restrict_to_groups` is refused, as IAM groups aren't principals and a policy can't
+match their members. `create` also applies the policy to existing secrets it created, but doesn't remove a policy when
+`permissions` is removed.
 
 Every command takes the desired state (`-d`) and the AWS region (`-r`), and reads the desired state's `terraform`
 configuration: `-c`, or cloned as per the desired state. `-p` sets the AWS profile (default `$AWS_PROFILE`) and `-e`
@@ -163,8 +171,8 @@ the environment (default `all`).
 | Command | What it does |
 |---|---|
 | `assemble -C <dir>` | Writes the assembled desired state and configuration to `<dir>`. Doesn't contact AWS. |
-| `plan` | Shows the secrets `create` would create. |
-| `create` | Creates each of the region's `is_created_here` secrets that doesn't exist yet: first a KMS key of its own (`alias/<secret name>`, rotation on), then the secret, with the value `placeholder` in every field (base64-encoded for fields ending in `_b64`), and a resource policy if `permissions` is set. Existing secrets are left as they are. Secrets not created here must already exist. `-n`, or `IS_DRY_RUN=1`, only shows what it would do. |
+| `plan` | Shows the secrets `create` would create, and the resource policies it would apply. |
+| `create` | Creates each of the region's `is_created_here` secrets that doesn't exist yet: first a KMS key of its own (`alias/<secret name>` with dots replaced by dashes, rotation on), then the secret, with the value `placeholder` in every field (base64-encoded for fields ending in `_b64`), and a resource policy if `permissions` is set. The alias must be one KMS accepts, so these names can't use `+`, `=` or `@`, and two secrets can't share an alias. Existing secrets are left as they are, apart from their resource policy. Secrets not created here must already exist. `-n`, or `IS_DRY_RUN=1`, only shows what it would do. |
 | `validate` | Reads each secret at the versions in `versions`, and fails if its fields don't match `keys`. |
 | `destroy` | Asks, then immediately deletes the region's `is_created_here` secrets, with their replicas, KMS key and alias. It only deletes secrets `create` made, which have its `isCreatedHere` tag, and keeps a KMS key that isn't the secret's own. `-f` doesn't ask; `--dry-run` shows what it would do. |
 

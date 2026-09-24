@@ -378,13 +378,7 @@ func writeFiles(t *testing.T, dir string, files map[string]string) {
 	}
 }
 
-func TestAssembleSecrets(t *testing.T) {
-	captureLogs(t)
-	desiredStates := t.TempDir()
-	configurations := t.TempDir()
-
-	writeFiles(t, desiredStates, map[string]string{
-		"example/secrets/create/desiredstate.yaml": `---
+const smDesiredState = `---
 schema: 2.0.0
 namespace: yago
 kind: DesiredState
@@ -409,9 +403,73 @@ desiredstate:
           path: example/secrets/create/configuration.yaml
           watch:
             - example/{**,.}/*
+`
+
+func writeSecretsFixture(t *testing.T, configurationFiles map[string]string) (string, string) {
+	t.Helper()
+	desiredStates := t.TempDir()
+	configurations := t.TempDir()
+	writeFiles(t, desiredStates, map[string]string{"example/secrets/create/desiredstate.yaml": smDesiredState})
+	writeFiles(t, configurations, configurationFiles)
+	return filepath.Join(desiredStates, "example/secrets/create/desiredstate.yaml"),
+		filepath.Join(configurations, "example/secrets/create/configuration.yaml")
+}
+
+func TestSmCommandsDryRun(t *testing.T) {
+	captureLogs(t)
+	t.Setenv("IS_DRY_RUN", "")
+	desiredState, configuration := writeSecretsFixture(t, map[string]string{
+		"example/secrets/create/configuration.yaml": `---
+schema: 2.0.0
+namespace: yago
+kind: Configuration
+configuration:
+  meta:
+    parts:
+      self: example/secrets/create/configuration.yaml
+  wrappers:
+    terraform:
+      parts:
+        terraform: example/secrets/create/terraform/terraform.yaml
 `,
+		"example/secrets/create/terraform/terraform.yaml": strings.Replace(libConfiguration, "project_properties:", "project_properties_env:", 1),
 	})
-	writeFiles(t, configurations, map[string]string{
+
+	isDryRun := []bool{}
+	original := newSecretManager
+	t.Cleanup(func() { newSecretManager = original })
+	newSecretManager = func(awsProfile, awsRegion string, dryRun bool) (secretManager, error) {
+		isDryRun = append(isDryRun, dryRun)
+		return &fakeSecretManager{existing: map[string]bool{"example/read-only": true}}, nil
+	}
+
+	for _, tc := range []struct {
+		args         []string
+		wantIsDryRun bool
+	}{
+		{args: []string{"plan"}, wantIsDryRun: true},
+		{args: []string{"create"}, wantIsDryRun: false},
+		{args: []string{"create", "-n"}, wantIsDryRun: true},
+		{args: []string{"validate"}, wantIsDryRun: false},
+		{args: []string{"destroy", "-f"}, wantIsDryRun: false},
+		{args: []string{"destroy", "--dry-run"}, wantIsDryRun: true},
+	} {
+		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
+			isDryRun = nil
+			args := append(tc.args, "-r", "eu-west-1", "-d", desiredState, "-c", configuration)
+			if err := executeSm(args...); err != nil {
+				t.Fatal(err)
+			}
+			if len(isDryRun) != 1 || isDryRun[0] != tc.wantIsDryRun {
+				t.Fatalf("expected one secret manager with dry run %v, got %v", tc.wantIsDryRun, isDryRun)
+			}
+		})
+	}
+}
+
+func TestAssembleSecrets(t *testing.T) {
+	captureLogs(t)
+	desiredState, configuration := writeSecretsFixture(t, map[string]string{
 		"example/secrets/create/configuration.yaml": `---
 schema: 2.0.0
 namespace: yago
@@ -455,10 +513,7 @@ secrets:
 	})
 
 	cacheDir := t.TempDir()
-	response, err := NewService(".", false).AssembleSecrets(
-		filepath.Join(desiredStates, "example/secrets/create/desiredstate.yaml"),
-		filepath.Join(configurations, "example/secrets/create/configuration.yaml"),
-		"all", cacheDir)
+	response, err := NewService(".", false).AssembleSecrets(desiredState, configuration, "all", cacheDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -477,11 +532,11 @@ secrets:
 	if err != nil {
 		t.Fatal(err)
 	}
-	var configuration map[string]interface{}
-	if err := json.Unmarshal(cached, &configuration); err != nil {
+	var cachedConfiguration map[string]interface{}
+	if err := json.Unmarshal(cached, &cachedConfiguration); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(configuration["project_properties"], want) || configuration["secrets"] == nil {
+	if !reflect.DeepEqual(cachedConfiguration["project_properties"], want) || cachedConfiguration["secrets"] == nil {
 		t.Fatalf("unexpected cached configuration: %s", cached)
 	}
 	if _, err := os.Stat(filepath.Join(cacheDir, "desiredstate.tfvars.json")); err != nil {

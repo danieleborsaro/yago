@@ -26,6 +26,14 @@ func newSecretRequest(name string, isCreatedHere bool) CreateRequest {
 	}
 }
 
+func captureLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var logs bytes.Buffer
+	logging.SetOutput(&logs)
+	t.Cleanup(func() { logging.SetOutput(os.Stderr) })
+	return &logs
+}
+
 func Test_Create_MakesTheSecretAndItsKey(t *testing.T) {
 	fake := newFakeAWS()
 	sm := fake.secretManager(false)
@@ -65,8 +73,8 @@ func Test_Create_MakesTheSecretAndItsKey(t *testing.T) {
 	if !key.rotation || key.tags["Foo:Environment:ResourceType"] != ":AWS::KMS::Key" {
 		t.Errorf("unexpected key: %+v", key)
 	}
-	if fake.called("PutResourcePolicy") {
-		t.Error("a resource policy was applied without permissions")
+	if fake.called("PutResourcePolicy") || fake.called("GetResourcePolicy") {
+		t.Error("the resource policy was touched without permissions")
 	}
 }
 
@@ -79,8 +87,8 @@ func Test_Create_LeavesAnExistingSecret(t *testing.T) {
 	if err != nil || isCreated || result != nil {
 		t.Fatalf("expected the existing secret to be left alone, got %+v, %v, %v", result, isCreated, err)
 	}
-	if fake.called("CreateSecret") || fake.called("CreateKey") {
-		t.Fatalf("an existing secret was recreated: %v", fake.calls)
+	if mutations := fake.mutations(); len(mutations) != 0 {
+		t.Fatalf("an existing secret was changed: %v", mutations)
 	}
 }
 
@@ -111,31 +119,40 @@ func Test_Create_FailsForAMissingSecretNotCreatedHere(t *testing.T) {
 	}
 }
 
-func Test_Create_DryRunOnlyCountsMissingSecrets(t *testing.T) {
+func Test_Create_DryRunMakesNoChanges(t *testing.T) {
+	logs := captureLogs(t)
 	fake := newFakeAWS()
-	fake.addSecret("existing", "", map[string]string{})
+	fake.addSecret("existing", "", map[string]string{"isCreatedHere": "true"})
 	sm := fake.secretManager(true)
 
-	_, isCreated, err := sm.Create(newSecretRequest("existing", true))
+	existing := newSecretRequest("existing", true)
+	existing.Permissions.RestrictToRoles = []string{"app"}
+	_, isCreated, err := sm.Create(existing)
 	if err != nil || isCreated {
 		t.Fatalf("an existing secret would be created: %v, %v", isCreated, err)
 	}
+	if !strings.Contains(logs.String(), "[Dry-Run] Would apply resource policy to secret 'existing'") {
+		t.Errorf("expected the dry run to report the policy change:\n%s", logs.String())
+	}
 
-	result, isCreated, err := sm.Create(newSecretRequest("missing", true))
+	missing := newSecretRequest("missing", true)
+	missing.Permissions.RestrictToRoles = []string{"app"}
+	result, isCreated, err := sm.Create(missing)
 	if err != nil || !isCreated {
 		t.Fatalf("a missing secret would not be created: %v, %v", isCreated, err)
 	}
 	if !strings.Contains(result.ARN, ":123456789012:") {
 		t.Errorf("expected the real account in the planned ARN, got %s", result.ARN)
 	}
-	if fake.called("CreateSecret") || fake.called("CreateKey") || fake.called("CreateAlias") {
-		t.Fatalf("a dry run changed AWS: %v", fake.calls)
+	if mutations := fake.mutations(); len(mutations) != 0 {
+		t.Fatalf("a dry run changed AWS: %v", mutations)
 	}
 }
 
-func Test_Create_ReusesTheKeyBehindItsAlias(t *testing.T) {
+func Test_Create_ReusesItsOwnKeyBehindItsAlias(t *testing.T) {
 	fake := newFakeAWS()
 	fake.addKey("existing-key")
+	fake.keys["existing-key"].tags["Name"] = "example"
 	fake.aliases["alias/example"] = "existing-key"
 	sm := fake.secretManager(false)
 
@@ -145,30 +162,129 @@ func Test_Create_ReusesTheKeyBehindItsAlias(t *testing.T) {
 	if fake.called("CreateKey") || fake.secrets["example"].kmsKeyId != "existing-key" {
 		t.Fatalf("expected the key behind alias/example to be reused: %v", fake.calls)
 	}
+	if !fake.keys["existing-key"].rotation {
+		t.Error("the reused key's rotation was not enabled")
+	}
 }
 
-func Test_Create_FailsWhenThePolicyFails(t *testing.T) {
+func Test_Create_RefusesAKeyNotCreatedForTheSecret(t *testing.T) {
+	fake := newFakeAWS()
+	sm := fake.secretManager(false)
+	if _, _, err := sm.Create(newSecretRequest("example/app.database", true)); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, isDryRun := range []bool{true, false} {
+		_, _, err := fake.secretManager(isDryRun).Create(newSecretRequest("example/app-database", true))
+		if err == nil || !strings.Contains(err.Error(), "was not created for secret 'example/app-database'") {
+			t.Fatalf("expected the alias of example/app.database to be refused (dry run %v), got %v", isDryRun, err)
+		}
+	}
+	if _, exists := fake.secrets["example/app-database"]; exists {
+		t.Fatal("a secret was created with another secret's key")
+	}
+}
+
+func Test_Create_RefusesAKeyPendingDeletion(t *testing.T) {
+	fake := newFakeAWS()
+	fake.addKey("old-key")
+	fake.keys["old-key"].tags["Name"] = "example"
+	fake.keys["old-key"].pendingDeletion = true
+	fake.aliases["alias/example"] = "old-key"
+
+	_, _, err := fake.secretManager(false).Create(newSecretRequest("example", true))
+	if err == nil || !strings.Contains(err.Error(), "pending deletion") {
+		t.Fatalf("expected the key pending deletion to be refused, got %v", err)
+	}
+}
+
+func Test_Create_RefusesANameKmsCantUseInAnAlias(t *testing.T) {
+	fake := newFakeAWS()
+
+	_, _, err := fake.secretManager(false).Create(newSecretRequest("app/user@example.com", true))
+	if err == nil || !strings.Contains(err.Error(), "KMS aliases may only use") {
+		t.Fatalf("expected the name to be refused, got %v", err)
+	}
+	if mutations := fake.mutations(); len(mutations) != 0 {
+		t.Fatalf("expected no changes, got %v", mutations)
+	}
+}
+
+func Test_Create_SchedulesTheNewKeyForDeletionIfItsAliasFails(t *testing.T) {
+	fake := newFakeAWS()
+	fake.createAliasErr = errors.New("LimitExceededException")
+
+	_, _, err := fake.secretManager(false).Create(newSecretRequest("example", true))
+	if err == nil || !strings.Contains(err.Error(), "was scheduled for deletion") {
+		t.Fatalf("expected the alias failure, got %v", err)
+	}
+	if !fake.keys["key-1"].pendingDeletion || fake.called("CreateSecret") {
+		t.Fatalf("expected the new key to be scheduled for deletion and no secret: %v", fake.calls)
+	}
+}
+
+func Test_Create_AppliesTheResourcePolicy(t *testing.T) {
+	fake := newFakeAWS()
+	request := newSecretRequest("example", true)
+	request.Permissions.RestrictToRoles = []string{"app"}
+
+	if _, _, err := fake.secretManager(false).Create(request); err != nil {
+		t.Fatal(err)
+	}
+	policy := fake.secrets["example"].policy
+	if !strings.Contains(policy, `"Effect":"Deny"`) || !strings.Contains(policy, "arn:aws:iam::123456789012:role/app") {
+		t.Fatalf("expected a policy denying everyone but role/app, got %s", policy)
+	}
+}
+
+func Test_Create_AppliesThePolicyAfterAFailedAttempt(t *testing.T) {
 	fake := newFakeAWS()
 	fake.putResourcePolicyErr = errors.New("MalformedPolicyDocumentException")
-	sm := fake.secretManager(false)
-
 	request := newSecretRequest("example", true)
 	request.Permissions.RestrictToUsers = []string{"alice"}
-	_, _, err := sm.Create(request)
-	if err == nil || !strings.Contains(err.Error(), "resource policy could not be applied") {
+
+	_, _, err := fake.secretManager(false).Create(request)
+	if err == nil || !strings.Contains(err.Error(), "Run create again") {
 		t.Fatalf("expected the policy failure, got %v", err)
+	}
+
+	fake.putResourcePolicyErr = nil
+	if _, _, err := fake.secretManager(false).Create(request); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(fake.secrets["example"].policy, "arn:aws:iam::123456789012:user/alice") {
+		t.Fatalf("the second run didn't apply the policy: %q", fake.secrets["example"].policy)
+	}
+
+	fake.calls = nil
+	if _, _, err := fake.secretManager(false).Create(request); err != nil {
+		t.Fatal(err)
+	}
+	if fake.called("PutResourcePolicy") {
+		t.Fatal("an unchanged policy was applied again")
+	}
+}
+
+func Test_Create_LeavesThePolicyOfASecretNotCreatedByYago(t *testing.T) {
+	fake := newFakeAWS()
+	fake.addSecret("example", "", map[string]string{"ManagedBy": "terraform"})
+	request := newSecretRequest("example", true)
+	request.Permissions.RestrictToRoles = []string{"app"}
+
+	_, _, err := fake.secretManager(false).Create(request)
+	if err == nil || !strings.Contains(err.Error(), "was not created by yago") {
+		t.Fatalf("expected the policy change to be refused, got %v", err)
+	}
+	if fake.called("PutResourcePolicy") {
+		t.Fatal("the policy of a secret yago didn't create was changed")
 	}
 }
 
 func Test_CreateDoesNotLogTheSecretValue(t *testing.T) {
 	const value = "s3cr3t-value-that-must-not-leak"
-	var logs bytes.Buffer
-	logging.SetOutput(&logs)
+	logs := captureLogs(t)
 	logging.SetLevel(logging.DEBUG)
-	t.Cleanup(func() {
-		logging.SetOutput(os.Stderr)
-		logging.SetLevel(logging.INFO)
-	})
+	t.Cleanup(func() { logging.SetLevel(logging.INFO) })
 
 	fake := newFakeAWS()
 	request := newSecretRequest("example/app/database", true)
@@ -205,6 +321,56 @@ func Test_Destroy_DeletesASecretCreatedHere(t *testing.T) {
 	}
 	if _, exists := fake.aliases["alias/example"]; exists {
 		t.Error("the key's alias was not deleted")
+	}
+}
+
+func Test_Destroy_RemovesTheReplicasFirst(t *testing.T) {
+	fake := newFakeAWS()
+	sm := fake.secretManager(false)
+	if _, _, err := sm.Create(newSecretRequest("example", true)); err != nil {
+		t.Fatal(err)
+	}
+	fake.secrets["example"].replicas = []string{"eu-west-2", "us-east-1"}
+
+	if err := sm.Destroy("example"); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := fake.secrets["example"]; exists {
+		t.Error("the secret was not deleted")
+	}
+}
+
+func Test_Destroy_StopsIfTheReplicasCantBeRemoved(t *testing.T) {
+	fake := newFakeAWS()
+	sm := fake.secretManager(false)
+	if _, _, err := sm.Create(newSecretRequest("example", true)); err != nil {
+		t.Fatal(err)
+	}
+	fake.secrets["example"].replicas = []string{"eu-west-2"}
+	fake.removeReplicasErr = errors.New("AccessDeniedException")
+
+	err := sm.Destroy("example")
+	if err == nil || !strings.Contains(err.Error(), "failed to delete the replicas") {
+		t.Fatalf("expected the replica failure, got %v", err)
+	}
+	if fake.called("DeleteSecret") || fake.called("ScheduleKeyDeletion") {
+		t.Fatalf("the secret or its key was deleted although its replicas remain: %v", fake.calls)
+	}
+}
+
+func Test_Destroy_DryRunMakesNoChanges(t *testing.T) {
+	fake := newFakeAWS()
+	if _, _, err := fake.secretManager(false).Create(newSecretRequest("example", true)); err != nil {
+		t.Fatal(err)
+	}
+	fake.secrets["example"].replicas = []string{"eu-west-2"}
+	fake.calls = nil
+
+	if err := fake.secretManager(true).Destroy("example"); err != nil {
+		t.Fatal(err)
+	}
+	if mutations := fake.mutations(); len(mutations) != 0 {
+		t.Fatalf("a dry run changed AWS: %v", mutations)
 	}
 }
 
@@ -245,6 +411,22 @@ func Test_Destroy_KeepsASharedKey(t *testing.T) {
 	}
 }
 
+func Test_Destroy_KeepsTheKeyOfAnotherSecretBehindTheSameAlias(t *testing.T) {
+	fake := newFakeAWS()
+	if _, _, err := fake.secretManager(false).Create(newSecretRequest("example/app.database", true)); err != nil {
+		t.Fatal(err)
+	}
+	keyId := fake.aliases["alias/example/app-database"]
+	fake.addSecret("example/app-database", fake.keys[keyId].arn, map[string]string{"isCreatedHere": "true"})
+
+	if err := fake.secretManager(false).Destroy("example/app-database"); err != nil {
+		t.Fatal(err)
+	}
+	if fake.keys[keyId].pendingDeletion || fake.aliases["alias/example/app-database"] != keyId {
+		t.Fatal("the key of example/app.database was deleted with example/app-database")
+	}
+}
+
 func Test_Destroy_FailsForAMissingSecret(t *testing.T) {
 	err := newFakeAWS().secretManager(false).Destroy("missing")
 	if err == nil || !strings.Contains(err.Error(), "does not exist") {
@@ -266,6 +448,9 @@ func Test_Validate_ComparesTheKeysBothWays(t *testing.T) {
 	}
 	if !result.IsExpectedKeysOk || !result.IsStoredKeysOk {
 		t.Fatalf("expected the keys to match: %+v", result)
+	}
+	if result.KmsAliasName != "alias/example" || !strings.HasPrefix(result.KmsKeyArn, "arn:aws:kms:") {
+		t.Fatalf("expected the key's ARN and alias: %+v", result)
 	}
 
 	result, err = sm.Validate("example", []string{"username", "password"}, []string{"AWSCURRENT"})

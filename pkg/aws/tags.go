@@ -245,10 +245,15 @@ func Tags(c TagConfiguration, resourceType, name string) (map[string]string, []s
 		return orderedKeys[i] < orderedKeys[j]
 	})
 
+	limit := maxTags
+	if resourceType == ResourceTypeSecret {
+		limit-- // Leaves room for the isCreatedHere tag that Create adds, which destroy needs.
+	}
+
 	tags := map[string]string{}
 	dropped := []string{}
 	for i, key := range orderedKeys {
-		if i < maxTags {
+		if i < limit {
 			tags[key] = limitedTags[key]
 		} else {
 			dropped = append(dropped, key)
