@@ -427,6 +427,13 @@ func runAssemble(flags *commonFlags) error {
 	return nil
 }
 
+func newTerraformCommandService(flags *commonFlags, codeDir string) *Service {
+	service := NewService(codeDir, false)
+	service.SetAWSProfile(flags.awsProfile)
+	service.SetAWSRegion(flags.awsRegion)
+	return service
+}
+
 func prepareTerraformAssembledInputs(flags *commonFlags) (*TerraformAssembleResponse, error) {
 	service := NewService(".", false)
 	resp, err := service.AssembleTerraform(TerraformAssembleRequest{
@@ -570,7 +577,7 @@ func runInit(flags *commonFlags, isReset, isGetProviders, isUpgradeModules, isUs
 	logging.Spaces()
 
 	// Check Terraform version
-	service := NewService(codeDir, false)
+	service := newTerraformCommandService(flags, codeDir)
 	if err := service.CheckDependencies(); err != nil {
 		return fmt.Errorf("terraform version check failed: %w", err)
 	}
@@ -646,7 +653,7 @@ func runPlan(flags *commonFlags, isPlanForDestroy, isInit, isReset, isGetProvide
 	logging.Info("")
 
 	// Create service
-	service := NewService(codeDir, false)
+	service := newTerraformCommandService(flags, codeDir)
 
 	// Check terraform version
 	err = service.CheckDependencies()
@@ -788,7 +795,7 @@ func runProvision(flags *commonFlags, isDryRun bool) error {
 	}
 
 	// Create service
-	service := NewService(codeDir, false)
+	service := newTerraformCommandService(flags, codeDir)
 
 	// Check terraform version
 	err = service.CheckDependencies()
@@ -856,7 +863,7 @@ func runDestroyWithPlan(flags *commonFlags, isDryRun bool) error {
 	}
 
 	// Create service
-	service := NewService(codeDir, false)
+	service := newTerraformCommandService(flags, codeDir)
 
 	// Check terraform version
 	err := service.CheckDependencies()
@@ -924,7 +931,7 @@ func runDestroyWithoutPlan(flags *commonFlags, isAutoApprove, isInit, isReset, i
 	logging.Info("")
 
 	// Create service
-	service := NewService(codeDir, false)
+	service := newTerraformCommandService(flags, codeDir)
 
 	// Check terraform version
 	err = service.CheckDependencies()
@@ -1041,7 +1048,7 @@ func runOutput(flags *commonFlags, outputFile string, isInit, isReset, isGetProv
 	logging.Info("")
 
 	// Create service
-	service := NewService(codeDir, false)
+	service := newTerraformCommandService(flags, codeDir)
 
 	// Check terraform version
 	err = service.CheckDependencies()
@@ -1163,7 +1170,7 @@ func runGraph(flags *commonFlags, graphType string, isInit, isReset, isGetModule
 	logging.Spaces()
 
 	// 3. Create terraform service
-	service := NewService(codeDir, false)
+	service := newTerraformCommandService(flags, codeDir)
 
 	// 4. Check terraform version
 	err = service.CheckDependencies()
@@ -1324,7 +1331,7 @@ func runUnlock(flags *commonFlags, lockId string, isConfirmUnlock bool) error {
 	codeDir := flags.terraformSource
 
 	// Create terraform service
-	service := NewService(codeDir, false)
+	service := newTerraformCommandService(flags, codeDir)
 
 	// Run terraform unlock
 	logging.Info("Terraform unlock...")
@@ -1386,7 +1393,7 @@ func runImport(flags *commonFlags, tfResourceId, awsResourceId string, isUseLoca
 	logging.Spaces()
 
 	// 3. Create terraform service
-	service := NewService(codeDir, false)
+	service := newTerraformCommandService(flags, codeDir)
 
 	// 4. Check dependencies (terraform version)
 	logging.Info("Checking terraform version...")
@@ -1510,7 +1517,7 @@ func runCosts(flags *commonFlags, isUsePlanFile bool) error {
 	logging.Spaces()
 
 	// 3. Create terraform service
-	service := NewService(codeDir, false)
+	service := newTerraformCommandService(flags, codeDir)
 
 	// 4. Run infracost
 	logging.Info("Estimating costs...")

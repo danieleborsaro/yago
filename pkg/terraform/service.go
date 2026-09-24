@@ -1,6 +1,7 @@
 package terraform
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,6 +11,7 @@ import (
 	"github.com/danieleborsaro/yago/internal/utils/errors"
 	"github.com/danieleborsaro/yago/internal/utils/logging"
 	"github.com/danieleborsaro/yago/pkg/wrapper"
+	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -30,6 +32,8 @@ type Service struct {
 	useLocalBackend bool
 	isDryRun        bool
 	assembleParser  *Parser
+	codeDir         string
+	secretReader    secretValueReader
 }
 
 // NewService creates a new terraform service instance.
@@ -42,6 +46,7 @@ func NewService(baseDir string, enableInterpolation bool) *Service {
 		tfVersion:   DefaultTerraformVersion,
 		workspace:   "default",
 		isDryRun:    isDryRun,
+		codeDir:     baseDir,
 	}
 
 	service.SetAssembleHooks(service)
@@ -121,10 +126,8 @@ func (s *Service) AssembleTerraform(req TerraformAssembleRequest) (*TerraformAss
 		return nil, errors.Wrapf(errors.ErrParse, err, "failed to load terraform GitOps files")
 	}
 
-	codeDir := req.TerraformSource
-	if parser.IsClonedSourceCode() {
-		codeDir = parser.GetSourceCodeDir()
-	}
+	// Absolute, so the backend and var file paths still resolve when Terraform runs inside codeDir.
+	codeDir := parser.GetSourceCodeDir()
 	if codeDir == "" {
 		return nil, errors.New(errors.ErrParam, "terraform source workdir could not be resolved")
 	}
@@ -199,7 +202,46 @@ func (s *Service) PostCache(req wrapper.AssembleRequest, response *wrapper.Assem
 		return errors.Wrapf(errors.ErrFail, err, "failed to cache terraform backend configuration")
 	}
 
+	if response.DesiredStateFile != "" {
+		if err := keepOnlyDesiredStateVariable(response.DesiredStateFile, generateJSON); err != nil {
+			return errors.Wrapf(errors.ErrFail, err, "failed to prepare desiredstate var file %s", response.DesiredStateFile)
+		}
+	}
+	if err := cacheSecretInputs(response.ConfigurationFile, req.CacheDirectory, s.awsProfile, s.awsRegion, generateJSON); err != nil {
+		return errors.Wrap(errors.ErrFail, "failed to prepare Terraform secret references", err)
+	}
+
 	return nil
+}
+
+// Terraform warns about every undeclared variable in a -var-file, so keep only the desiredstate key.
+func keepOnlyDesiredStateVariable(path string, generateJSON bool) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+
+	var doc map[string]interface{}
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return err
+	}
+
+	value, ok := doc["desiredstate"]
+	if !ok {
+		return nil
+	}
+	trimmed := map[string]interface{}{"desiredstate": value}
+
+	if generateJSON {
+		data, err = json.MarshalIndent(trimmed, "", "  ")
+	} else {
+		data, err = yaml.Marshal(trimmed)
+	}
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(path, data, 0644)
 }
 
 // InitRequest contains parameters for terraform init operation.
@@ -355,6 +397,15 @@ func (s *Service) Plan(req PlanRequest) (*PlanResponse, error) {
 	}
 
 	logging.Info("Terraform plan completed successfully")
+	if req.OutFile != "" && !s.isDryRun {
+		manifest, err := readSecretManifest(defaultSecretManifest(req.WorkingDir))
+		if err != nil {
+			return nil, err
+		}
+		if err := writeSecretManifest(terraformPlanPath(req.WorkingDir, req.OutFile)+planSecretSuffix, manifest); err != nil {
+			return nil, fmt.Errorf("failed to save secret references alongside Terraform plan: %w", err)
+		}
+	}
 	return &PlanResponse{
 		Success:    true,
 		Output:     output,
@@ -403,7 +454,24 @@ func (s *Service) Apply(req ApplyRequest) (*ApplyResponse, error) {
 		args = append(args, "-lock=false")
 	}
 
-	output, err := s.runTerraformCommand(req.WorkingDir, args...)
+	manifestPath := defaultSecretManifest(req.WorkingDir)
+	if req.PlanFile != "" {
+		planManifest := terraformPlanPath(req.WorkingDir, req.PlanFile) + planSecretSuffix
+		if _, err := os.Stat(planManifest); err == nil {
+			manifestPath = planManifest
+		} else if !os.IsNotExist(err) {
+			return nil, err
+		} else {
+			manifest, err := readSecretManifest(manifestPath)
+			if err != nil {
+				return nil, err
+			}
+			if len(manifest.Variables) > 0 {
+				return nil, fmt.Errorf("saved plan has no secret reference manifest; generate the plan again with yago")
+			}
+		}
+	}
+	output, err := s.runTerraformCommandWithSecrets(req.WorkingDir, manifestPath, args...)
 	if err != nil {
 		return &ApplyResponse{
 			Success: false,
@@ -581,8 +649,9 @@ func (s *Service) ValidateTerraform(req ValidateRequest) (*ValidateResponse, err
 func (s *Service) CheckDependencies() error {
 	logging.Info("Checking terraform version...")
 
-	// Run terraform --version
+	// In codeDir, so version managers (mise, asdf) pick the same version as the other terraform commands.
 	cmd := exec.Command("terraform", "--version")
+	cmd.Dir = s.codeDir
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return errors.Wrap(errors.ErrMissingTool, "terraform command not found, please install terraform", err)
@@ -1034,6 +1103,10 @@ func (s *Service) Costs(req CostsRequest) (*CostsResponse, error) {
 
 // runTerraformCommand executes a terraform command and returns the output.
 func (s *Service) runTerraformCommand(workingDir string, args ...string) (string, error) {
+	return s.runTerraformCommandWithSecrets(workingDir, defaultSecretManifest(workingDir), args...)
+}
+
+func (s *Service) runTerraformCommandWithSecrets(workingDir, manifestPath string, args ...string) (string, error) {
 	// Check if terraform is available
 	tfPath, err := exec.LookPath("terraform")
 	if err != nil {
@@ -1063,17 +1136,29 @@ func (s *Service) runTerraformCommand(workingDir string, args ...string) (string
 	cmd := exec.Command("terraform", args...)
 	cmd.Dir = workingDir
 
-	// Set AWS environment variables if configured
+	// Resolve references only at execution time, never during assembly or dry runs.
+	var secrets map[string]string
+	if needsSecretVariables(args) {
+		secrets, err = s.secretEnvironment(manifestPath)
+		if err != nil {
+			return "", err
+		}
+	}
+	overrides := make(map[string]string, len(secrets)+2)
+	for key, value := range secrets {
+		overrides[key] = value
+	}
 	if s.awsProfile != "" {
-		cmd.Env = append(os.Environ(), fmt.Sprintf("AWS_PROFILE=%s", s.awsProfile))
+		overrides["AWS_PROFILE"] = s.awsProfile
 	}
 	if s.awsRegion != "" {
-		cmd.Env = append(os.Environ(), fmt.Sprintf("AWS_REGION=%s", s.awsRegion))
+		overrides["AWS_REGION"] = s.awsRegion
 	}
+	cmd.Env = mergeCommandEnvironment(os.Environ(), overrides)
 
 	// Capture output
 	output, err := cmd.CombinedOutput()
-	outputStr := string(output)
+	outputStr := redactSecretOutput(string(output), secrets)
 
 	if err != nil {
 		logging.Error("Terraform command failed: %v", err)
