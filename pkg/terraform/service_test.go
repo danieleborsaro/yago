@@ -1,6 +1,7 @@
 package terraform
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -41,6 +42,44 @@ func TestAssembleTerraform_RequiresDesiredStateFile(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "desiredstate file must be specified") {
 		t.Fatalf("expected desiredstate required error, got: %v", err)
+	}
+}
+
+func TestAssembleTerraform_RelativeSourceDirIsMadeAbsolute(t *testing.T) {
+	yagoRoot := yagoRootFromTestFile(t)
+	chdirForTest(t, yagoRoot)
+
+	prevNamespace := schema.GetNamespaceOverride()
+	schema.SetNamespaceOverride("legacy")
+	t.Cleanup(func() {
+		schema.SetNamespaceOverride(prevNamespace)
+	})
+
+	terraformSource := t.TempDir()
+	relativeSource, err := filepath.Rel(yagoRoot, terraformSource)
+	if err != nil {
+		t.Fatalf("failed to make %q relative to %q: %v", terraformSource, yagoRoot, err)
+	}
+
+	svc := NewService(".", false)
+	resp, err := svc.AssembleTerraform(TerraformAssembleRequest{
+		DesiredStateFile: filepath.Join("tests", "assets", "4.2.0", "desiredstates", "concourse-cluster", "desiredstate.yaml"),
+		ConfigFile:       filepath.Join("tests", "assets", "4.2.0", "configurations", "concourse-cluster", "configuration.yaml"),
+		Environment:      "all",
+		AWSRegion:        "eu-west-1",
+		TerraformSource:  relativeSource,
+	})
+	if err != nil {
+		t.Fatalf("AssembleTerraform returned error: %v", err)
+	}
+
+	if resp.CodeDirectory != terraformSource {
+		t.Fatalf("expected absolute code directory %q, got %q", terraformSource, resp.CodeDirectory)
+	}
+	for _, path := range []string{resp.BuildDirectory, resp.DesiredStateFile, resp.ConfigurationFile, resp.BackendFile} {
+		if !filepath.IsAbs(path) {
+			t.Fatalf("expected an absolute path, got %q", path)
+		}
 	}
 }
 
@@ -103,6 +142,17 @@ func TestAssembleTerraform_FixtureAssemble_CachesBackendAndDocuments(t *testing.
 
 	if !strings.HasSuffix(resp.DesiredStateFile, ".tfvars.json") {
 		t.Fatalf("expected desiredstate artifact to use json extension, got %q", resp.DesiredStateFile)
+	}
+	dsData, err := os.ReadFile(resp.DesiredStateFile)
+	if err != nil {
+		t.Fatalf("failed to read desiredstate artifact: %v", err)
+	}
+	var dsVars map[string]interface{}
+	if err := json.Unmarshal(dsData, &dsVars); err != nil {
+		t.Fatalf("desiredstate artifact is not valid JSON: %v", err)
+	}
+	if len(dsVars) != 1 || dsVars["desiredstate"] == nil {
+		t.Fatalf("expected desiredstate artifact to hold only the desiredstate variable, got %d top-level keys", len(dsVars))
 	}
 	if !strings.HasSuffix(resp.ConfigurationFile, ".tfvars.json") {
 		t.Fatalf("expected configuration artifact to use json extension, got %q", resp.ConfigurationFile)

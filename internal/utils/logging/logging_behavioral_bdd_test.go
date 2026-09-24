@@ -123,13 +123,13 @@ func TestLogging_LogLevelHierarchy_BehavioralBDD(t *testing.T) {
 			// Log at the test level
 			switch tt.messageLevel {
 			case DEBUG:
-				logger.Debug(testMessage)
+				logger.Debug("%s", testMessage)
 			case INFO:
-				logger.Info(testMessage)
+				logger.Info("%s", testMessage)
 			case WARN:
-				logger.Warn(testMessage)
+				logger.Warn("%s", testMessage)
 			case ERROR:
-				logger.Error(testMessage)
+				logger.Error("%s", testMessage)
 			}
 
 			output := buf.String()
@@ -296,13 +296,13 @@ func TestLogging_ColorCodedOutput_BehavioralBDD(t *testing.T) {
 
 			switch tt.level {
 			case DEBUG:
-				logger.Debug(testMessage)
+				logger.Debug("%s", testMessage)
 			case INFO:
-				logger.Info(testMessage)
+				logger.Info("%s", testMessage)
 			case WARN:
-				logger.Warn(testMessage)
+				logger.Warn("%s", testMessage)
 			case ERROR:
-				logger.Error(testMessage)
+				logger.Error("%s", testMessage)
 			}
 
 			output := buf.String()

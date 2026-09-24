@@ -877,7 +877,7 @@ func (s *BaseService) writeContentToFile(dir, filename string, content map[strin
 	if format == "json" {
 		// Normalize the content to ensure all map keys are strings
 		// YAML allows map[interface{}]interface{} but JSON requires map[string]interface{}
-		normalizedContent := s.normalizeMapForJSON(content)
+		normalizedContent := NormalizeMapForJSON(content)
 
 		encoder := json.NewEncoder(file)
 		encoder.SetIndent("", "  ")
@@ -895,9 +895,9 @@ func (s *BaseService) writeContentToFile(dir, filename string, content map[strin
 	return filepath, nil
 }
 
-// normalizeMapForJSON recursively converts map[interface{}]interface{} to map[string]interface{}
+// NormalizeMapForJSON recursively converts map[interface{}]interface{} to map[string]interface{}
 // This is necessary because YAML parsing can create map[interface{}]interface{} but JSON requires map[string]interface{}
-func (s *BaseService) normalizeMapForJSON(input interface{}) interface{} {
+func NormalizeMapForJSON(input interface{}) interface{} {
 	switch v := input.(type) {
 	case map[interface{}]interface{}:
 		// Convert map[interface{}]interface{} to map[string]interface{}
@@ -906,21 +906,21 @@ func (s *BaseService) normalizeMapForJSON(input interface{}) interface{} {
 			// Convert key to string
 			keyStr := fmt.Sprint(key)
 			// Recursively normalize the value
-			result[keyStr] = s.normalizeMapForJSON(value)
+			result[keyStr] = NormalizeMapForJSON(value)
 		}
 		return result
 	case map[string]interface{}:
 		// Already correct type, but need to normalize nested values
 		result := make(map[string]interface{})
 		for key, value := range v {
-			result[key] = s.normalizeMapForJSON(value)
+			result[key] = NormalizeMapForJSON(value)
 		}
 		return result
 	case []interface{}:
 		// Normalize all elements in the slice
 		result := make([]interface{}, len(v))
 		for i, item := range v {
-			result[i] = s.normalizeMapForJSON(item)
+			result[i] = NormalizeMapForJSON(item)
 		}
 		return result
 	default:
@@ -948,31 +948,17 @@ func (s *BaseService) getConfigRepoLocators(wrapper, environment string, desired
 // cloneAndLoadConfiguration clones the configuration repository based on desiredstate content.
 func (s *BaseService) cloneAndLoadConfiguration(desiredStateContent map[string]interface{}, wrapper, environment, configRepoWorkdir string, desiredStateDoc *core.GitOpsDocument) (*core.GitOpsDocument, error) {
 	locators := s.getConfigRepoLocators(wrapper, environment, desiredStateDoc)
-	normalized, ok := s.normalizeMapForJSON(desiredStateContent).(map[string]interface{})
+	normalized, ok := NormalizeMapForJSON(desiredStateContent).(map[string]interface{})
 	if !ok {
 		return nil, errors.New(errors.ErrParse, "desiredstate content has invalid structure")
 	}
 
-	h := parser.NewYAMLHandler("")
-	usableLocators := make([]string, 0, len(locators))
-	for _, locator := range locators {
-		if _, pathErr := h.GetValue(normalized, locator); pathErr == nil {
-			usableLocators = append(usableLocators, locator)
-		}
-	}
-	if len(usableLocators) == 0 {
-		return nil, errors.Newf(errors.ErrParse,
-			"no configuration repository locator found for wrapper '%s' and environment '%s' (tried locators: %v)",
-			wrapper,
-			environment,
-			locators,
-		)
+	usableLocators, err := filterUsableLocators(normalized, wrapper, environment, locators)
+	if err != nil {
+		return nil, err
 	}
 
-	var (
-		configDoc *core.GitOpsDocument
-		err       error
-	)
+	var configDoc *core.GitOpsDocument
 
 	for _, configRepoLocator := range usableLocators {
 		logging.Debug("Trying configuration repo locator: %s", configRepoLocator)

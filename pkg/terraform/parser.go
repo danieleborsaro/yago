@@ -122,12 +122,31 @@ func (p *Parser) LoadGitOpsFilesExtended(
 		p.SetConfiguration(cfg)
 		logging.Info("Loaded configuration with schema override: %s, namespace override: %s", schemaVersionOverride, namespaceOverride)
 	} else {
-		cfg := wrapper.NewBaseConfiguration(p.GetEnvironment(), "terraform", p.GetEnvVariables())
-		if err := cfg.CloneRepoAndLoad(wrapper.CloneRequest{
-			CloneDir:              p.configWorkdir,
-			DesiredStateContent:   ds.GetDocument().GetContent().Data,
-			SchemaVersionOverride: ds.GetSchemaVersion(),
-		}); err != nil {
+		dsDoc := ds.GetDocument()
+		dsMeta := map[string]interface{}{}
+		if dsDoc.GetMeta() != nil && dsDoc.GetMeta().Data != nil {
+			dsMeta = dsDoc.GetMeta().Data
+		}
+		locators, err := wrapper.UsableConfigRepoLocators("terraform", p.GetEnvironment(), dsDoc.GetContent().Data, dsMeta, dsDoc.GetSchemaVersion())
+		if err != nil {
+			return errors.Wrapf(errors.ErrParse, err, "failed to resolve configuration repo locator from desiredstate")
+		}
+
+		var cfg *wrapper.BaseConfiguration
+		for _, locator := range locators {
+			cfg = wrapper.NewBaseConfiguration(p.GetEnvironment(), "terraform", p.GetEnvVariables())
+			err = cfg.CloneRepoAndLoad(wrapper.CloneRequest{
+				CloneDir:              p.configWorkdir,
+				MetaRepoLocatorPath:   locator,
+				DesiredStateContent:   dsDoc.GetContent().Data,
+				SchemaVersionOverride: ds.GetSchemaVersion(),
+			})
+			if err == nil {
+				break
+			}
+			logging.Debug("Configuration repo locator %s did not resolve: %v", locator, err)
+		}
+		if err != nil {
 			return errors.Wrapf(errors.ErrParse, err, "failed to clone and load configuration from desiredstate")
 		}
 		p.SetConfiguration(cfg)

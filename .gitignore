@@ -86,8 +86,6 @@ docker-compose.override.yml
 # Custom schema directories (example/test)
 project-schemas/
 
-.golangci*
-
 ## Disabled modules
 docker/
 pkg/github/

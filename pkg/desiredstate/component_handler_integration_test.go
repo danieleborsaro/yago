@@ -165,6 +165,10 @@ func TestConcurrentHandlerAccess(t *testing.T) {
 
 // TestHandlerRegistryLookupPerformance benchmarks handler lookup performance.
 func TestHandlerRegistryLookupPerformance(t *testing.T) {
+	if raceEnabled {
+		t.Skip("The race detector slows lookups too much to check the 1µs limit")
+	}
+
 	const numLookups = 10000
 
 	start := time.Now()

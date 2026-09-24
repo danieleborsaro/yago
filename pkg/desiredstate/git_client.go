@@ -44,7 +44,7 @@ func (g *GitClient) ResolveRefToCommit(repoURL, ref string) (string, error) {
 	}
 
 	commitSHA := parts[0]
-	logging.Debug(fmt.Sprintf("Resolved %s@%s to commit %s", repoURL, ref, commitSHA))
+	logging.Debug("Resolved %s@%s to commit %s", repoURL, ref, commitSHA)
 	return commitSHA, nil
 }
 

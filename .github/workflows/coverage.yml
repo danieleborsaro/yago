@@ -13,7 +13,6 @@ on:
 
 env:
   COVERAGE_THRESHOLD: 30
-  GO_VERSION: '1.23'
 
 jobs:
   # ===========================================================================
@@ -33,15 +32,13 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: go.mod
           cache: true
 
       - name: Install dependencies
         run: |
           go mod download
           go mod verify
-          go install github.com/axw/gocov/gocov@latest
-          go install github.com/AlekSi/gocov-xml@latest
 
       - name: Run tests with coverage
         run: |
@@ -58,12 +55,6 @@ jobs:
 
           # HTML report
           go tool cover -html=coverage.out -o coverage.html
-
-          # XML report for tools
-          gocov convert coverage.out | gocov-xml > coverage.xml
-
-          # JSON report for analysis
-          gocov convert coverage.out > coverage.json
 
       - name: Calculate coverage percentage
         id: coverage
@@ -154,7 +145,7 @@ jobs:
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
         with:
-          files: ./coverage.out,./coverage.xml
+          files: ./coverage.out
           flags: unittests,behavioral-bdd
           name: full-coverage
           fail_ci_if_error: false
@@ -185,8 +176,6 @@ jobs:
           path: |
             coverage.out
             coverage.html
-            coverage.xml
-            coverage.json
             coverage-summary.txt
             package-coverage.md
           retention-days: 90
@@ -227,7 +216,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: go.mod
           cache: true
 
       - name: Run package tests with coverage
