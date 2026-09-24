@@ -138,7 +138,7 @@ func Test_GeneratePlaceholderSecretString(t *testing.T) {
 		{name: "JSON secret with keys", keys: []string{"username", "password"}, plaintext: "placeholder",
 			want: `{"password":"placeholder","username":"placeholder"}`},
 		{name: "Base64 field", keys: []string{"user", "ssh_private_key_b64"}, plaintext: "placeholder",
-			want: `{"ssh_private_key_b64":"cGxhY2Vob2xkZXI=","user":"placeholder"}`},
+			want: `{"ssh_private_key_b64":"cGxhY2Vob2xkZXI=","user":"placeholder"}`}, //gitleaks:allow
 	}
 
 	for _, tt := range tests {
