@@ -8,9 +8,10 @@ import (
 	coreRepo "github.com/danieleborsaro/yago/internal/repo"
 	"github.com/danieleborsaro/yago/internal/schema"
 	"github.com/danieleborsaro/yago/internal/utils/logging"
-	_ "github.com/danieleborsaro/yago/pkg/concourse"    // Import to trigger factory registration
-	_ "github.com/danieleborsaro/yago/pkg/desiredstate" // Import to trigger factory registration
-	_ "github.com/danieleborsaro/yago/pkg/terraform"    // Import to trigger factory registration
+	_ "github.com/danieleborsaro/yago/pkg/concourse"      // Import to trigger factory registration
+	_ "github.com/danieleborsaro/yago/pkg/desiredstate"   // Import to trigger factory registration
+	_ "github.com/danieleborsaro/yago/pkg/secretsmanager" // Import to trigger factory registration
+	_ "github.com/danieleborsaro/yago/pkg/terraform"      // Import to trigger factory registration
 	"github.com/danieleborsaro/yago/pkg/wrapper"
 	"github.com/spf13/cobra"
 )

@@ -16,7 +16,7 @@ func (f *SecretManagerFactory) Name() string {
 
 // CreateParser creates a new secretsmanager parser instance.
 func (f *SecretManagerFactory) CreateParser(env string, envVars map[string]string) wrapper.Parser {
-	return NewParser(env, envVars)
+	return wrapper.NewBaseParser(env, envVars)
 }
 
 // CreateService creates a new secretsmanager service instance.

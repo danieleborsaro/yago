@@ -1,589 +1,342 @@
 package secretsmanager
 
 import (
+	"bufio"
 	"fmt"
+	"io"
 	"os"
+	"strings"
 
-	"gopkg.in/yaml.v3"
+	"github.com/spf13/cobra"
 
 	"github.com/danieleborsaro/yago/internal/utils/errors"
 	"github.com/danieleborsaro/yago/internal/utils/logging"
-	awssecretsmanager "github.com/danieleborsaro/yago/pkg/aws"
-	"github.com/danieleborsaro/yago/pkg/wrapper"
-	"github.com/spf13/cobra"
 )
+
+const logLevelHelp = `
+LOG_LEVEL={DEBUG,INFO,WARNING,ERROR,FATAL}  Controls output verbosity, default is INFO`
+
+type commonFlags struct {
+	awsProfile        string
+	awsRegion         string
+	desiredstateRoot  string
+	configurationRoot string
+	environment       string
+}
 
 // NewSecretManagerCommand creates the root secretsmanager command and its subcommands.
 func NewSecretManagerCommand() *cobra.Command {
-	rootCmd := &cobra.Command{
-		Use:   "secretsmanager",
-		Short: "AWS Secrets Manager GitOps wrapper",
-		Long: `SecretManager is a Yago wrapper for managing AWS Secrets Manager secrets
-through GitOps. It allows you to define, validate, and deploy secrets
-declaratively using YAML files.
-
-Examples:
-  # Validate secrets configuration
-  yago secretsmanager validate -f secrets.yaml
-
-  # Create secrets from configuration
-  yago secretsmanager create -f secrets.yaml
-
-  # List all managed secrets
-  yago secretsmanager list
-
-  # Read a specific secret
-  yago secretsmanager read my-secret`,
-		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			// Initialize logging from flags
-			return nil
-		},
-	}
-
-	// Add subcommands
-	rootCmd.AddCommand(NewValidateCommand())
-	rootCmd.AddCommand(NewCreateCommand())
-	rootCmd.AddCommand(NewListCommand())
-	rootCmd.AddCommand(NewReadCommand())
-	rootCmd.AddCommand(NewDeleteCommand())
-	rootCmd.AddCommand(NewRotateCommand())
-	rootCmd.AddCommand(NewDestroyCommand())
-
-	// Add common flags
-	rootCmd.PersistentFlags().StringP("aws-profile", "p", "default",
-		"AWS profile to use for operations")
-	rootCmd.PersistentFlags().StringP("aws-region", "r", "us-east-1",
-		"AWS region for secrets")
-	rootCmd.PersistentFlags().BoolP("dry-run", "d", false,
-		"Perform a dry run without making changes")
-	rootCmd.PersistentFlags().BoolP("verbose", "v", false,
-		"Enable verbose logging")
-
-	return rootCmd
-}
-
-// NewValidateCommand creates the 'validate' subcommand.
-func NewValidateCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "validate",
-		Short: "Validate secrets configuration",
-		Long: `Validate checks the secrets configuration file for correctness
-and validates that all required fields are present.
-
-The validation includes:
-- YAML structure validation
-- Required field checks
-- Schema compliance
-- Secret naming conventions
-- KMS key references`,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			filePath, _ := cmd.Flags().GetString("file")
-			dryRun, _ := cmd.Flags().GetBool("dry-run")
-			verbose, _ := cmd.Flags().GetBool("verbose")
-
-			if verbose {
-				logging.SetLevel(logging.DEBUG)
-			}
-
-			if dryRun {
-				logging.Info("[Dry-Run] Would validate secrets file: %s", filePath)
-				return nil
-			}
-
-			logging.Info("Validating secrets configuration: %s", filePath)
-
-			// Check if file exists
-			if _, err := os.Stat(filePath); err != nil {
-				return errors.Wrapf(errors.ErrParam, err, "secrets file not found: %s", filePath)
-			}
-
-			// Create service and validate
-			service := NewService(filePath, false)
-			req := wrapper.ValidateRequest{
-				DesiredStateFile: filePath,
-				SchemaVersion:    "gitops.io/v1",
-			}
-
-			resp, err := service.Validate(req)
-			if err != nil {
-				return errors.Wrapf(errors.ErrFail, err, "validation failed")
-			}
-
-			if !resp.IsValid {
-				logging.Error("Validation failed: %s", resp.ErrorMessage)
-				return errors.New(errors.ErrFail, resp.ErrorMessage)
-			}
-
-			logging.Info("✓ Validation successful for: %s", filePath)
-			return nil
-		},
+		Use:     "sm",
+		Aliases: []string{"secretsmanager"},
+		Short:   "Wrap AWS SecretsManager commands",
 	}
 
-	cmd.Flags().StringP("file", "f", "",
-		"Path to secrets configuration file (required)")
-	cmd.MarkFlagRequired("file")
-	cmd.Flags().StringP("config", "c", "",
-		"Path to configuration repository")
+	cmd.AddCommand(newAssembleCommand())
+	cmd.AddCommand(newPlanCommand())
+	cmd.AddCommand(newCreateCommand())
+	cmd.AddCommand(newValidateCommand())
+	cmd.AddCommand(newDestroyCommand())
 
 	return cmd
 }
 
-// NewCreateCommand creates the 'create' subcommand.
-func NewCreateCommand() *cobra.Command {
+func addCommonFlags(cmd *cobra.Command, flags *commonFlags) {
+	cmd.Flags().StringVarP(&flags.awsProfile, "aws-profile", "p", os.Getenv("AWS_PROFILE"), "AWS profile as configured in the AWS CLI auth helper")
+	cmd.Flags().StringVarP(&flags.awsRegion, "aws-region", "r", "", "AWS target region")
+	cmd.Flags().StringVarP(&flags.desiredstateRoot, "desiredstate-root", "d", "", "DesiredState file")
+	cmd.Flags().StringVarP(&flags.configurationRoot, "configuration-root", "c", "", "Sm configuration file, if not provided it will be cloned as per desiredstate")
+	cmd.Flags().StringVarP(&flags.environment, "environment", "e", "all", "Environment to deploy")
+
+	_ = cmd.MarkFlagRequired("aws-region")
+	_ = cmd.MarkFlagRequired("desiredstate-root")
+}
+
+func checkCommonFlags(flags *commonFlags) error {
+	if flags.awsRegion == "" {
+		return errors.NewParamError("AWS Region is not specified")
+	}
+	if info, err := os.Stat(flags.desiredstateRoot); err != nil || info.IsDir() {
+		return errors.NewParamError(fmt.Sprintf("DesiredState file '%s' is not readable", flags.desiredstateRoot))
+	}
+	if flags.configurationRoot != "" {
+		if info, err := os.Stat(flags.configurationRoot); err != nil || info.IsDir() {
+			return errors.NewParamError(fmt.Sprintf("Config file '%s' is not readable", flags.configurationRoot))
+		}
+	}
+	return nil
+}
+
+func logCommonFlags(flags *commonFlags) {
+	logging.Info("AWS profile:                   '%s'", flags.awsProfile)
+	logging.Info("AWS region:                    '%s'", flags.awsRegion)
+	logging.Info("Environment:                   '%s'", flags.environment)
+	logging.Info("DesiredState:                  '%s'", flags.desiredstateRoot)
+	logging.Info("Config:                        '%s'", flags.configurationRoot)
+}
+
+func newLib(flags *commonFlags, isDryRun bool) (*Lib, error) {
+	lib, err := NewLib(flags.awsProfile, flags.awsRegion, isDryRun)
+	if err != nil {
+		return nil, err
+	}
+	if err := lib.LoadGitOpsFiles(flags.desiredstateRoot, flags.configurationRoot, flags.environment); err != nil {
+		return nil, err
+	}
+	return lib, nil
+}
+
+func newAssembleCommand() *cobra.Command {
+	flags := &commonFlags{}
+	var cacheDir string
+
 	cmd := &cobra.Command{
-		Use:   "create",
-		Short: "Create secrets in AWS Secrets Manager",
-		Long: `Create provisions new secrets in AWS Secrets Manager based on
-the secrets configuration file.
-
-Features:
-- Automatic KMS key creation and management
-- IAM access policy configuration
-- Resource tagging
-- Idempotent operations (safe to run multiple times)
-- Auto-rotation configuration
-- Dry-run mode for testing`,
+		Use:     "assemble",
+		Aliases: []string{"a"},
+		Short:   "Assemble configuration as defined in desired state.",
+		Long:    "Assemble configuration as defined in desired state.\n" + logLevelHelp,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			filePath, _ := cmd.Flags().GetString("file")
-			awsProfile, _ := cmd.Flags().GetString("aws-profile")
-			awsRegion, _ := cmd.Flags().GetString("aws-region")
-			dryRun, _ := cmd.Flags().GetBool("dry-run")
-			verbose, _ := cmd.Flags().GetBool("verbose")
-
-			if verbose {
-				logging.SetLevel(logging.DEBUG)
+			if err := checkCommonFlags(flags); err != nil {
+				return err
+			}
+			if info, err := os.Stat(cacheDir); err != nil || !info.IsDir() {
+				return errors.NewParamError(fmt.Sprintf("Cache directory '%s' does not exist or is not a directory", cacheDir))
 			}
 
-			logging.Info("Creating secrets (profile=%s, region=%s, dryRun=%v)",
-				awsProfile, awsRegion, dryRun)
+			logging.Info("AWS profile:    '%s'", flags.awsProfile)
+			logging.Info("AWS region:     '%s'", flags.awsRegion)
+			logging.Info("Environment:    '%s'", flags.environment)
+			logging.Info("DesiredState:   '%s'", flags.desiredstateRoot)
+			logging.Info("Config:         '%s'", flags.configurationRoot)
+			logging.Info("Cache dir:      '%s'", cacheDir)
+			logging.Spaces()
 
-			if dryRun {
-				logging.Info("[Dry-Run] Would create secrets from: %s", filePath)
-				return nil
-			}
-
-			// Check if file exists
-			if _, err := os.Stat(filePath); err != nil {
-				return errors.Wrapf(errors.ErrParam, err, "secrets file not found: %s", filePath)
-			}
-
-			// For simplicity, directly validate the file
-			service := NewService(".", false)
-			validateReq := wrapper.ValidateRequest{
-				DesiredStateFile: filePath,
-				SchemaVersion:    "gitops.io/v1",
-			}
-
-			resp, err := service.Validate(validateReq)
+			response, err := NewService(".", false).AssembleSecrets(flags.desiredstateRoot, flags.configurationRoot, flags.environment, cacheDir)
 			if err != nil {
-				return errors.Wrapf(errors.ErrFail, err, "validation failed")
+				return err
 			}
 
-			if !resp.IsValid {
-				return errors.New(errors.ErrFail, resp.ErrorMessage)
-			}
-
-			// Initialize AWS SecretManager
-			manager, err := awssecretsmanager.NewSecretManager(awsProfile, awsRegion, false)
-			if err != nil {
-				return errors.Wrapf(errors.ErrFail, err, "failed to initialize AWS client")
-			}
-			defer manager.Close()
-
-			logging.Info("✓ Secrets created successfully from: %s", filePath)
+			logging.Info("Assembled desiredstate: '%s'", response.DesiredStateFile)
+			logging.Info("Assembled config:       '%s'", response.ConfigurationFile)
 			return nil
 		},
 	}
 
-	cmd.Flags().StringP("file", "f", "",
-		"Path to secrets configuration file (required)")
-	cmd.MarkFlagRequired("file")
-	cmd.Flags().StringP("config", "c", "",
-		"Path to configuration repository")
+	addCommonFlags(cmd, flags)
+	cmd.Flags().StringVarP(&cacheDir, "cache-dir", "C", "", "Cache assembled configuration to this directory")
+	_ = cmd.MarkFlagRequired("cache-dir")
 
 	return cmd
 }
 
-// NewListCommand creates the 'list' subcommand.
-func NewListCommand() *cobra.Command {
+func newPlanCommand() *cobra.Command {
+	flags := &commonFlags{}
+
 	cmd := &cobra.Command{
-		Use:   "list",
-		Short: "List all managed secrets",
-		Long: `List shows all secrets managed through GitOps in the
-specified AWS account and region.
-
-Output can be filtered by tags or name patterns.`,
+		Use:     "plan",
+		Aliases: []string{"p"},
+		Short:   "Plan for secret creation.",
+		Long:    "Plan for secret creation.\n" + logLevelHelp,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			awsProfile, _ := cmd.Flags().GetString("aws-profile")
-			awsRegion, _ := cmd.Flags().GetString("aws-region")
-			format, _ := cmd.Flags().GetString("format")
-			filter, _ := cmd.Flags().GetString("filter")
-			verbose, _ := cmd.Flags().GetBool("verbose")
-
-			if verbose {
-				logging.SetLevel(logging.DEBUG)
+			if err := checkCommonFlags(flags); err != nil {
+				return err
 			}
 
-			logging.Info("Listing secrets (profile=%s, region=%s, filter=%s)", awsProfile, awsRegion, filter)
+			logCommonFlags(flags)
+			logging.Spaces()
 
-			// Initialize AWS SecretManager
-			manager, err := awssecretsmanager.NewSecretManager(awsProfile, awsRegion, false)
+			lib, err := newLib(flags, true)
 			if err != nil {
-				return errors.Wrapf(errors.ErrFail, err, "failed to initialize AWS client")
+				return err
 			}
-			defer manager.Close()
-
-			// List all secrets (AWS SDK call)
-			// Note: Actual implementation would use AWS SDK to list secrets
-			logging.Info("✓ Secrets listed successfully (format=%s)", format)
-
-			return nil
+			return lib.Plan()
 		},
 	}
 
-	cmd.Flags().StringP("filter", "f", "",
-		"Filter secrets by name pattern or tag")
-	cmd.Flags().StringP("format", "o", "table",
-		"Output format (table, json, yaml)")
+	addCommonFlags(cmd, flags)
 
 	return cmd
 }
 
-// NewReadCommand creates the 'read' subcommand.
-func NewReadCommand() *cobra.Command {
+func newCreateCommand() *cobra.Command {
+	flags := &commonFlags{}
+	var isDryRun bool
+
 	cmd := &cobra.Command{
-		Use:   "read <secret-name>",
-		Short: "Read a secret value",
-		Long: `Read retrieves the current value of a secret from AWS Secrets Manager.
-
-The secret can be retrieved by:
-- Current version (AWSCURRENT)
-- Specific version ID
-- Custom version stage
-
-Important: This command outputs the secret value to stdout.
-Use with caution in scripts and consider redirecting to secure locations.`,
+		Use:     "create",
+		Aliases: []string{"c"},
+		Short:   "Creates secret structure with custom KMS key.",
+		Long:    "Creates secret structure with custom KMS key.\n" + logLevelHelp,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) == 0 {
-				return errors.New(errors.ErrParam, "secret name is required")
+			if err := checkCommonFlags(flags); err != nil {
+				return err
 			}
 
-			secretName := args[0]
-			awsProfile, _ := cmd.Flags().GetString("aws-profile")
-			awsRegion, _ := cmd.Flags().GetString("aws-region")
-			version, _ := cmd.Flags().GetString("version")
-			stage, _ := cmd.Flags().GetString("stage")
-			verbose, _ := cmd.Flags().GetBool("verbose")
+			logCommonFlags(flags)
+			logging.Info("Dry run:                       '%v'", isDryRun)
+			logging.Spaces()
 
-			if verbose {
-				logging.SetLevel(logging.DEBUG)
-			}
-
-			logging.Debug("Reading secret: %s (profile=%s, region=%s, version=%s, stage=%s)",
-				secretName, awsProfile, awsRegion, version, stage)
-
-			// Initialize AWS SecretManager
-			manager, err := awssecretsmanager.NewSecretManager(awsProfile, awsRegion, false)
+			lib, err := newLib(flags, isDryRun)
 			if err != nil {
-				return errors.Wrapf(errors.ErrFail, err, "failed to initialize AWS client")
+				return err
 			}
-			defer manager.Close()
-
-			// Determine version/stage to use
-			versionId := version
-			versionStage := stage
-			if stage == "" {
-				versionStage = "AWSCURRENT"
-			}
-
-			// Read the secret using Phase 0 implementation
-			secretValue, err := manager.Read(secretName, versionId, versionStage)
-			if err != nil {
-				return errors.Wrapf(errors.ErrFail, err, "failed to read secret: %s", secretName)
-			}
-
-			// Output to stdout
-			fmt.Println(secretValue)
-			return nil
+			return lib.Create()
 		},
 	}
 
-	cmd.Flags().StringP("version", "v", "",
-		"Specific version ID to retrieve")
-	cmd.Flags().StringP("stage", "s", "AWSCURRENT",
-		"Version stage to retrieve (default: AWSCURRENT)")
+	addCommonFlags(cmd, flags)
+	cmd.Flags().BoolVarP(&isDryRun, "dry-run", "n", os.Getenv("IS_DRY_RUN") == "1", "Disables command effect on target instance (env: IS_DRY_RUN)")
 
 	return cmd
 }
 
-// NewDeleteCommand creates the 'delete' subcommand.
-func NewDeleteCommand() *cobra.Command {
+func newValidateCommand() *cobra.Command {
+	flags := &commonFlags{}
+
 	cmd := &cobra.Command{
-		Use:   "delete <secret-name>",
-		Short: "Delete a secret",
-		Long: `Delete removes a secret from AWS Secrets Manager.
-
-By default, the secret is scheduled for deletion after a recovery window
-(default: 30 days). Use --force to delete immediately without recovery.
-
-Important: Deleted secrets cannot be recovered after the recovery window expires.`,
+		Use:     "validate",
+		Aliases: []string{"v"},
+		Short:   "Validates secret structure with custom KMS key.",
+		Long:    "Validates secret structure with custom KMS key.\n" + logLevelHelp,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) == 0 {
-				return errors.New(errors.ErrParam, "secret name is required")
+			if err := checkCommonFlags(flags); err != nil {
+				return err
 			}
 
-			secretName := args[0]
-			awsProfile, _ := cmd.Flags().GetString("aws-profile")
-			awsRegion, _ := cmd.Flags().GetString("aws-region")
-			force, _ := cmd.Flags().GetBool("force")
-			recoveryDays, _ := cmd.Flags().GetInt32("recovery-days")
-			dryRun, _ := cmd.Flags().GetBool("dry-run")
-			verbose, _ := cmd.Flags().GetBool("verbose")
+			logCommonFlags(flags)
+			logging.Spaces()
 
-			if verbose {
-				logging.SetLevel(logging.DEBUG)
-			}
-
-			if dryRun {
-				logging.Info("[Dry-Run] Would delete secret: %s", secretName)
-				return nil
-			}
-
-			logging.Info("Deleting secret: %s (profile=%s, region=%s, force=%v)",
-				secretName, awsProfile, awsRegion, force)
-
-			// Initialize AWS SecretManager
-			manager, err := awssecretsmanager.NewSecretManager(awsProfile, awsRegion, false)
+			lib, err := newLib(flags, false)
 			if err != nil {
-				return errors.Wrapf(errors.ErrFail, err, "failed to initialize AWS client")
+				return err
 			}
-			defer manager.Close()
-
-			// Determine recovery window
-			var recoveryWindowInDays int32 = 30
-			if force {
-				recoveryWindowInDays = 0
-			} else if recoveryDays > 0 {
-				recoveryWindowInDays = recoveryDays
-			}
-
-			logging.Info("✓ Secret deleted successfully: %s (recoveryWindow=%d days)",
-				secretName, recoveryWindowInDays)
-
-			return nil
+			return lib.Validate()
 		},
 	}
 
-	cmd.Flags().BoolP("force", "f", false,
-		"Force immediate deletion without recovery window")
-	cmd.Flags().Int32P("recovery-days", "r", 30,
-		"Recovery window in days (default: 30, 0 for no recovery)")
+	addCommonFlags(cmd, flags)
 
 	return cmd
 }
 
-// NewRotateCommand creates the 'rotate' subcommand.
-func NewRotateCommand() *cobra.Command {
+func newDestroyCommand() *cobra.Command {
+	flags := &commonFlags{}
+	var isForce, isDryRun bool
+
 	cmd := &cobra.Command{
-		Use:   "rotate <secret-name>",
-		Short: "Rotate a secret",
-		Long: `Rotate triggers secret rotation in AWS Secrets Manager.
+		Use:     "destroy",
+		Aliases: []string{"Sdest"},
+		Short:   "Destroy (delete) secrets created by yago.",
+		Long: `Destroy (delete) secrets created by yago.
 
-This creates a new version of the secret and optionally configures
-automatic rotation using a Lambda function.
+Only deletes secrets marked with is_created_here=true in configuration, which yago created (they have its
+isCreatedHere tag). Includes deletion of associated KMS keys and aliases.
 
-The rotation requires:
-- A Lambda function with proper IAM permissions
-- Configuration of the rotation schedule`,
+Uses 7-day deletion schedule for KMS keys (AWS requirement).
+` + logLevelHelp,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) == 0 {
-				return errors.New(errors.ErrParam, "secret name is required")
+			if err := checkCommonFlags(flags); err != nil {
+				return err
 			}
 
-			secretName := args[0]
-			awsProfile, _ := cmd.Flags().GetString("aws-profile")
-			awsRegion, _ := cmd.Flags().GetString("aws-region")
-			lambdaArn, _ := cmd.Flags().GetString("lambda-arn")
-			rotationDays, _ := cmd.Flags().GetInt32("rotation-days")
-			dryRun, _ := cmd.Flags().GetBool("dry-run")
-			verbose, _ := cmd.Flags().GetBool("verbose")
+			logCommonFlags(flags)
+			logging.Info("Dry-run mode:                  '%s'", enabled(isDryRun))
+			logging.Info("Force (skip confirmation):     '%s'", enabled(isForce))
+			logging.Spaces()
 
-			if verbose {
-				logging.SetLevel(logging.DEBUG)
-			}
-
-			if dryRun {
-				logging.Info("[Dry-Run] Would rotate secret: %s", secretName)
-				return nil
-			}
-
-			logging.Info("Rotating secret: %s (profile=%s, region=%s, lambda=%s)",
-				secretName, awsProfile, awsRegion, lambdaArn)
-
-			// Initialize AWS SecretManager
-			manager, err := awssecretsmanager.NewSecretManager(awsProfile, awsRegion, false)
+			lib, err := newLib(flags, isDryRun)
 			if err != nil {
-				return errors.Wrapf(errors.ErrFail, err, "failed to initialize AWS client")
+				return err
 			}
-			defer manager.Close()
-
-			// Validate inputs
-			if lambdaArn != "" && rotationDays <= 0 {
-				return errors.New(errors.ErrParam, "rotation-days must be > 0 when lambda-arn is specified")
-			}
-
-			logging.Info("✓ Secret rotated successfully: %s (rotationDays=%d)",
-				secretName, rotationDays)
-
-			return nil
+			return destroySecrets(lib, cmd.InOrStdin(), isForce, isDryRun)
 		},
 	}
 
-	cmd.Flags().StringP("lambda-arn", "l", "",
-		"ARN of Lambda function for automatic rotation")
-	cmd.Flags().Int32P("rotation-days", "d", 30,
-		"Rotate automatically after N days")
+	addCommonFlags(cmd, flags)
+	cmd.Flags().BoolVarP(&isForce, "force", "f", false, "Skip confirmation and force destruction without prompting")
+	cmd.Flags().BoolVar(&isDryRun, "dry-run", false, "Show what would be destroyed without actually deleting")
 
 	return cmd
 }
 
-// NewDestroyCommand creates the 'destroy' subcommand.
-func NewDestroyCommand() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "destroy",
-		Short: "Destroy secrets and associated resources",
-		Long: `Destroy removes secrets from AWS Secrets Manager and their associated resources.
+func destroySecrets(lib *Lib, input io.Reader, isForce, isDryRun bool) error {
+	secretsToDestroy := lib.SecretsCreatedHere()
 
-This is a destructive operation that:
-- Deletes the secret from Secrets Manager
-- Deletes associated KMS keys and aliases
-- Deletes secret replicas in all regions
-- Cannot be undone
-
-SAFETY MECHANISMS:
-1. Only secrets marked with isCreatedHere: true can be destroyed
-2. The --force flag is required to perform actual destruction
-3. Use --dry-run first to preview what would be destroyed
-4. If both --force and --dry-run are set, dry-run takes precedence
-
-Examples:
-  # Preview what would be destroyed
-  yago secretsmanager destroy -f secrets.yaml --dry-run
-
-  # Perform actual destruction (requires --force)
-  yago secretsmanager destroy -f secrets.yaml --force`,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			filePath, _ := cmd.Flags().GetString("file")
-			awsProfile, _ := cmd.Flags().GetString("aws-profile")
-			awsRegion, _ := cmd.Flags().GetString("aws-region")
-			dryRun, _ := cmd.Flags().GetBool("dry-run")
-			force, _ := cmd.Flags().GetBool("force")
-			verbose, _ := cmd.Flags().GetBool("verbose")
-
-			if verbose {
-				logging.SetLevel(logging.DEBUG)
-			}
-
-			// Validate precedence: dry-run takes precedence over force
-			if dryRun && force {
-				logging.Warn("Both --dry-run and --force specified; dry-run takes precedence")
-			}
-
-			// If not dry-run, --force is required
-			if !dryRun && !force {
-				return errors.New(errors.ErrParam,
-					"--force flag is required for actual destruction (use --dry-run to preview)")
-			}
-
-			logging.Info("Starting destroy operation for secrets in '%s'", filePath)
-
-			// Check if file exists
-			if _, err := os.Stat(filePath); err != nil {
-				return errors.Wrapf(errors.ErrParam, err, "secrets file not found: %s", filePath)
-			}
-
-			// Load secrets from YAML file directly
-			fileContent, err := os.ReadFile(filePath)
-			if err != nil {
-				return errors.Wrapf(errors.ErrFail, err, "failed to read secrets file")
-			}
-
-			// Parse YAML
-			var desiredState SecretManagerDesiredStateSpec
-			if err := yaml.Unmarshal(fileContent, &desiredState); err != nil {
-				return errors.Wrapf(errors.ErrParse, err, "failed to parse secrets YAML")
-			}
-
-			if len(desiredState.Secrets) == 0 {
-				logging.Warn("No secrets found in configuration")
-				return nil
-			}
-
-			// Count secrets eligible for destruction
-			eligibleCount := 0
-			for _, secret := range desiredState.Secrets {
-				if secret.IsCreatedHere {
-					eligibleCount++
-				}
-			}
-
-			logging.Info("Found %d secrets in config, %d marked for destruction (isCreatedHere=true)",
-				len(desiredState.Secrets), eligibleCount)
-
-			if eligibleCount == 0 {
-				logging.Warn("No secrets marked for destruction (isCreatedHere=true required)")
-				return nil
-			}
-
-			// Initialize AWS SecretManager with dry-run setting
-			manager, err := awssecretsmanager.NewSecretManager(awsProfile, awsRegion, dryRun)
-			if err != nil {
-				return errors.Wrapf(errors.ErrFail, err, "failed to initialize AWS client")
-			}
-			defer manager.Close()
-
-			// Destroy each eligible secret
-			destroyedCount := 0
-			failedCount := 0
-
-			for _, secret := range desiredState.Secrets {
-				if !secret.IsCreatedHere {
-					logging.Debug("Skipping secret '%s' (isCreatedHere=false)", secret.Name)
-					continue
-				}
-
-				logging.Info("Destroying secret: %s", secret.Name)
-				if err := manager.Destroy(secret.Name); err != nil {
-					logging.Error("Failed to destroy secret '%s': %v", secret.Name, err)
-					failedCount++
-				} else {
-					destroyedCount++
-				}
-			}
-
-			// Report results
-			if dryRun {
-				logging.Info("[Dry-Run] Would destroy %d secrets", destroyedCount)
-			} else {
-				logging.Info("Destroyed %d secrets (failed: %d)", destroyedCount, failedCount)
-			}
-
-			if failedCount > 0 {
-				return errors.Newf(errors.ErrFail,
-					"failed to destroy %d secrets", failedCount)
-			}
-
-			logging.Info("✓ Destroy operation completed successfully")
-
-			return nil
-		},
+	if len(secretsToDestroy) == 0 {
+		logging.Warn("No secrets marked with is_created_here=true found in configuration")
+		return nil
 	}
 
-	cmd.Flags().StringP("file", "f", "",
-		"Path to secrets YAML file (required)")
-	cmd.MarkFlagRequired("file")
-	cmd.Flags().BoolP("force", "F", false,
-		"Required flag to enable actual destruction (safety mechanism)")
+	logging.Info("Found %d secret(s) to destroy:", len(secretsToDestroy))
+	for _, name := range secretsToDestroy {
+		logging.Info("  - %s", name)
+	}
 
-	return cmd
+	if !isForce && !isDryRun {
+		logging.Spaces()
+		confirmed, err := confirm(input, fmt.Sprintf("About to destroy %d secret(s). Continue? [y/N]: ", len(secretsToDestroy)))
+		if err != nil {
+			return err
+		}
+		if !confirmed {
+			logging.Warn("Destruction cancelled by user")
+			return nil
+		}
+	}
+
+	logging.Spaces()
+
+	failed := []string{}
+	for _, name := range secretsToDestroy {
+		logging.Info("Destroying secret: %s", name)
+		if err := lib.Destroy(name); err != nil {
+			logging.Error("✗ Failed to destroy %s: %v", name, err)
+			failed = append(failed, name)
+			continue
+		}
+		if isDryRun {
+			logging.Info("[Dry-Run] Would destroy: %s", name)
+		} else {
+			logging.Info("✓ Successfully destroyed: %s", name)
+		}
+	}
+
+	logging.Spaces()
+	if isDryRun {
+		logging.Info("[Dry-Run] Destruction summary: %d/%d would succeed", len(secretsToDestroy)-len(failed), len(secretsToDestroy))
+	} else {
+		logging.Info("Destruction summary: %d/%d successful", len(secretsToDestroy)-len(failed), len(secretsToDestroy))
+	}
+
+	if len(failed) > 0 {
+		logging.Error("Failed to destroy the following secrets:")
+		for _, name := range failed {
+			logging.Error("  - %s", name)
+		}
+		return errors.Newf(errors.ErrFail, "failed to destroy %d of %d secrets", len(failed), len(secretsToDestroy))
+	}
+	return nil
+}
+
+func confirm(input io.Reader, question string) (bool, error) {
+	fmt.Fprint(os.Stderr, question)
+
+	answer, err := bufio.NewReader(input).ReadString('\n')
+	if err != nil && answer == "" {
+		return false, errors.New(errors.ErrParam, "destruction needs confirmation, but there is no input to read it from (use --force)")
+	}
+
+	switch strings.ToLower(strings.TrimSpace(answer)) {
+	case "y", "yes":
+		return true, nil
+	default:
+		return false, nil
+	}
+}
+
+func enabled(value bool) string {
+	if value {
+		return "enabled"
+	}
+	return "disabled"
 }

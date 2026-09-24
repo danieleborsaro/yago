@@ -260,6 +260,13 @@ func Spaces() {
 	fmt.Fprintln(globalLogger.output)
 }
 
+func Snippet(message, header, footer string) {
+	magenta := color.New(color.FgMagenta)
+	_, _ = fmt.Fprintln(globalLogger.output, magenta.Sprint(header))
+	_, _ = fmt.Fprintln(globalLogger.output, message)
+	_, _ = fmt.Fprintln(globalLogger.output, magenta.Sprint(footer))
+}
+
 // ParseLevel parses a string log level
 func ParseLevel(levelStr string) (LogLevel, error) {
 	switch strings.ToUpper(levelStr) {

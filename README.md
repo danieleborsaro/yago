@@ -122,9 +122,58 @@ yago desiredstate unlock myfile.yaml
 # Show status of a desired state
 yago desiredstate status myfile.yaml
 
+# AWS Secrets Manager
+yago sm plan -r eu-west-1 -d my-app/secrets/create/desiredstate.yaml
+yago sm create -r eu-west-1 -d my-app/secrets/create/desiredstate.yaml
+yago sm validate -r eu-west-1 -d my-app/secrets/create/desiredstate.yaml
+
 # Enable verbose logging
 yago --verbose desiredstate validate myfile.yaml
 ```
+
+### Secrets Manager
+
+`yago sm` (alias `secretsmanager`) creates and checks the secrets described by the `secrets` block of a desired
+state's Terraform configuration, keyed by AWS region. Terraform root modules read the same block. It only describes the
+secrets; their values are never in it:
+
+```yaml
+secrets:
+  eu-west-1:
+    database:
+      is_created_here: true       # this configuration creates the secret; false means it must already exist
+      name: my-app/database       # the secret's name in Secrets Manager
+      description: Database credentials
+      versions:                   # version IDs (or stages) in use
+        version_a: 6324c1f6-e0eb-4066-af51-29059f772d48
+      keys:                       # the fields of the secret's JSON value; none means plain text
+        username_path: username
+        certificate_path: certificate_b64
+      permissions:                # optional: a resource policy restricting the secret
+        restrict_to_roles: [my-app]
+```
+
+To add a secret: add it with `is_created_here: true`, run `plan` then `create`, set its real value in Secrets Manager,
+record the new version ID under `versions`, then run `validate`.
+
+Every command takes the desired state (`-d`) and the AWS region (`-r`), and reads the desired state's `terraform`
+configuration: `-c`, or cloned as per the desired state. `-p` sets the AWS profile (default `$AWS_PROFILE`) and `-e`
+the environment (default `all`).
+
+| Command | What it does |
+|---|---|
+| `assemble -C <dir>` | Writes the assembled desired state and configuration to `<dir>`. Doesn't contact AWS. |
+| `plan` | Shows the secrets `create` would create. |
+| `create` | Creates each of the region's `is_created_here` secrets that doesn't exist yet: first a KMS key of its own (`alias/<secret name>`, rotation on), then the secret, with the value `placeholder` in every field (base64-encoded for fields ending in `_b64`), and a resource policy if `permissions` is set. Existing secrets are left as they are. Secrets not created here must already exist. `-n`, or `IS_DRY_RUN=1`, only shows what it would do. |
+| `validate` | Reads each secret at the versions in `versions`, and fails if its fields don't match `keys`. |
+| `destroy` | Asks, then immediately deletes the region's `is_created_here` secrets, with their replicas, KMS key and alias. It only deletes secrets `create` made, which have its `isCreatedHere` tag, and keeps a KMS key that isn't the secret's own. `-f` doesn't ask; `--dry-run` shows what it would do. |
+
+`create` tags the secrets and their KMS keys as the awstagging Terraform provider would, from `project_properties`,
+which merges `project_properties_global`, `_eco`, `_proj` and `_env` (each overriding the ones before). It needs
+`company_name_short` (the tag prefix), `accounts_coding` (with the account's ID), `owner`, `cost_centre`,
+`compliance`, `infra_environment`, `project_name_long` and `resource_set_long`, and also uses `app_environment`,
+`app_ecosystem`, `role`, `description`, `custom_tags` and `custom_tags_verbatim`. As no Terraform is involved, there
+are no TerraformModule or TerraformWorkspace tags.
 
 ### Examples
 
@@ -355,17 +404,17 @@ yago/
 │   ├── wrapper/            # Wrapper orchestration
 │   ├── terraform/          # Terraform integration
 │   ├── concourse/          # Concourse CI integration
-│   ├── docker/             # Docker integration
-│   └── ...                 # Other tool integrations
+│   ├── secretsmanager/     # AWS Secrets Manager integration
+│   └── aws/                # AWS clients (ECR, S3, Secrets Manager)
 ├── assets/
-│   └── schemas/gitops/     # Embedded JSON schemas (1.0.0, 2.0.0)
+│   └── schemas/            # Embedded JSON schemas (1.0.0, 2.0.0)
 ├── tests/                  # Integration test assets
 ├── docs/                   # Documentation
 ├── .github/workflows/      # CI/CD pipelines
 │   ├── behavioral-bdd-tests.yml  # Comprehensive test suite
 │   └── pr-check.yml        # Quick PR validation
 ├── .golangci.yml          # Go linting configuration
-├── .yamllint.yml          # YAML linting configuration
+├── .yamllint.yaml         # YAML linting configuration
 ├── .pre-commit-config.yaml # Pre-commit hooks
 ├── Makefile              # Build automation
 └── go.mod                # Go module definition
