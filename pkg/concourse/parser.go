@@ -451,20 +451,11 @@ func (p *Parser) resolveConfigRepoLocator(dsContent map[string]interface{}, dsMe
 		return "", fmt.Errorf("desiredstate content is empty")
 	}
 
-	locators := wrapper.ConfigRepoLocatorsFromMeta("concourse", p.GetEnvironment(), dsMeta, schemaVersion)
-	h := yamlparser.NewYAMLHandler("")
-	for _, locator := range locators {
-		if _, err := h.GetValue(dsContent, locator); err == nil {
-			return locator, nil
-		}
+	locators, err := wrapper.UsableConfigRepoLocators("concourse", p.GetEnvironment(), dsContent, dsMeta, schemaVersion)
+	if err != nil {
+		return "", err
 	}
-
-	return "", fmt.Errorf(
-		"no configuration repository locator found for wrapper '%s' and environment '%s' (tried locators: %v)",
-		"concourse",
-		p.GetEnvironment(),
-		locators,
-	)
+	return locators[0], nil
 }
 
 // resolveRepoPathFromDS resolves a pipeline repo path from desiredstate content.

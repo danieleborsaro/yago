@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/danieleborsaro/yago/internal/parser"
 	"github.com/danieleborsaro/yago/internal/schema"
+	"github.com/danieleborsaro/yago/internal/utils/errors"
 )
 
 func appendUniqueLocator(target []string, candidate string) []string {
@@ -53,4 +55,26 @@ func ConfigRepoLocatorsFromMeta(wrapperName, environment string, dsMeta map[stri
 	locators = appendUniqueLocator(locators, fmt.Sprintf("desiredstate.configuration.%s.%s.git", environment, wrapperName))
 
 	return locators
+}
+
+// UsableConfigRepoLocators returns the candidate locators the desiredstate has, in order.
+// A locator can exist without being the repository itself, so callers try each until one clones.
+func UsableConfigRepoLocators(wrapperName, environment string, dsContent, dsMeta map[string]interface{}, schemaVersion string) ([]string, error) {
+	return filterUsableLocators(dsContent, wrapperName, environment, ConfigRepoLocatorsFromMeta(wrapperName, environment, dsMeta, schemaVersion))
+}
+
+func filterUsableLocators(dsContent map[string]interface{}, wrapperName, environment string, locators []string) ([]string, error) {
+	h := parser.NewYAMLHandler("")
+	usable := make([]string, 0, len(locators))
+	for _, locator := range locators {
+		if _, err := h.GetValue(dsContent, locator); err == nil {
+			usable = append(usable, locator)
+		}
+	}
+	if len(usable) == 0 {
+		return nil, errors.Newf(errors.ErrParse,
+			"no configuration repository locator found for wrapper '%s' and environment '%s' (tried locators: %v)",
+			wrapperName, environment, locators)
+	}
+	return usable, nil
 }

@@ -953,26 +953,12 @@ func (s *BaseService) cloneAndLoadConfiguration(desiredStateContent map[string]i
 		return nil, errors.New(errors.ErrParse, "desiredstate content has invalid structure")
 	}
 
-	h := parser.NewYAMLHandler("")
-	usableLocators := make([]string, 0, len(locators))
-	for _, locator := range locators {
-		if _, pathErr := h.GetValue(normalized, locator); pathErr == nil {
-			usableLocators = append(usableLocators, locator)
-		}
-	}
-	if len(usableLocators) == 0 {
-		return nil, errors.Newf(errors.ErrParse,
-			"no configuration repository locator found for wrapper '%s' and environment '%s' (tried locators: %v)",
-			wrapper,
-			environment,
-			locators,
-		)
+	usableLocators, err := filterUsableLocators(normalized, wrapper, environment, locators)
+	if err != nil {
+		return nil, err
 	}
 
-	var (
-		configDoc *core.GitOpsDocument
-		err       error
-	)
+	var configDoc *core.GitOpsDocument
 
 	for _, configRepoLocator := range usableLocators {
 		logging.Debug("Trying configuration repo locator: %s", configRepoLocator)
