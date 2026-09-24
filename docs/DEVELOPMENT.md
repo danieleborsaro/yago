@@ -100,7 +100,7 @@ Pre-commit hooks run automatically before each commit to ensure code quality.
    - `gofmt`: Format Go code
    - `goimports`: Organize imports
    - `go-mod-tidy`: Keep go.mod clean
-   - `golangci-lint`: Comprehensive linting
+   - `go-unit-tests`: Run the unit tests
 
 2. **YAML Hooks**:
    - `yamllint`: YAML syntax and style checking
@@ -223,7 +223,7 @@ golangci-lint run --timeout=10m
 pre-commit run --verbose --all-files
 
 # Run specific hook
-pre-commit run golangci-lint --all-files
+pre-commit run go-unit-tests --all-files
 ```
 
 **3. YAML linting errors**:
@@ -242,8 +242,8 @@ yamllint -f parsable file.yaml
 # Fix imports automatically
 goimports -w .
 
-# Check import grouping
-golangci-lint run --enable=goimports
+# Show what the gofmt and goimports formatters would change
+golangci-lint fmt --diff
 ```
 
 ### Performance Tips
