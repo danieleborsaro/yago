@@ -33,17 +33,17 @@ func cacheSecretInputs(configPath, buildDir, profile, region string, generateJSO
 		}
 		var doc map[string]interface{}
 		if err := yaml.Unmarshal(data, &doc); err != nil {
-			return fmt.Errorf("cannot parse assembled Terraform configuration")
+			return fmt.Errorf("cannot parse assembled Terraform configuration: %w", err)
 		}
 		if raw, exists := doc["secret_variables"]; exists {
 			encoded, err := yaml.Marshal(raw)
 			if err != nil {
-				return fmt.Errorf("invalid secret_variables configuration")
+				return fmt.Errorf("invalid secret_variables configuration: %w", err)
 			}
 			decoder := yaml.NewDecoder(bytes.NewReader(encoded))
 			decoder.KnownFields(true)
 			if err := decoder.Decode(&manifest.Variables); err != nil {
-				return fmt.Errorf("secret_variables must map Terraform variable names to secret_id, json_key, version_id, or version_stage")
+				return fmt.Errorf("secret_variables must map Terraform variable names to secret_id, json_key, version_id, or version_stage: %w", err)
 			}
 			if err := validateSecretBindings(manifest.Variables); err != nil {
 				return err
@@ -60,7 +60,7 @@ func cacheSecretInputs(configPath, buildDir, profile, region string, generateJSO
 				data, err = yaml.Marshal(doc)
 			}
 			if err != nil {
-				return fmt.Errorf("cannot encode assembled Terraform configuration")
+				return fmt.Errorf("cannot encode assembled Terraform configuration: %w", err)
 			}
 			if err := os.WriteFile(configPath, data, 0600); err != nil {
 				return err
@@ -123,7 +123,7 @@ func (s *Service) secretEnvironment(manifestPath string) (map[string]string, err
 	if reader == nil {
 		manager, err := awsmanager.NewSecretManager(profile, region, false)
 		if err != nil {
-			return nil, fmt.Errorf("cannot initialize AWS Secrets Manager for Terraform inputs")
+			return nil, fmt.Errorf("cannot initialize AWS Secrets Manager for Terraform inputs: %w", err)
 		}
 		reader = manager
 		defer func() { _ = manager.Close() }()

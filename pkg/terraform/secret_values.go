@@ -46,7 +46,7 @@ func validSecretVariableName(name string) bool {
 func validateSecretBindings(bindings map[string]SecretVariableBinding) error {
 	for _, name := range secretBindingNames(bindings) {
 		if !validSecretVariableName(name) {
-			return fmt.Errorf("secret binding has an invalid Terraform variable name")
+			return fmt.Errorf("secret binding has an invalid Terraform variable name: %q", name)
 		}
 		binding := bindings[name]
 		if strings.TrimSpace(binding.SecretID) == "" {
@@ -83,8 +83,8 @@ func resolveSecretVariables(bindings map[string]SecretVariableBinding, reader se
 			var err error
 			value, err = reader.Read(binding.SecretID, binding.VersionID, binding.VersionStage)
 			if err != nil {
-				// Reader errors may contain secret values, so do not wrap or log them.
-				return nil, fmt.Errorf("failed to read secret for Terraform variable %q", name)
+				// Secrets Manager errors never contain secret values. The JSON errors below can, so they aren't wrapped.
+				return nil, fmt.Errorf("failed to read secret for Terraform variable %q: %w", name, err)
 			}
 			cache[key] = value
 		}
