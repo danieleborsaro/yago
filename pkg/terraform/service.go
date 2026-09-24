@@ -216,7 +216,7 @@ func (s *Service) PostCache(req wrapper.AssembleRequest, response *wrapper.Assem
 
 // Terraform warns about every undeclared variable in a -var-file, so keep only the desiredstate key.
 func keepOnlyDesiredStateVariable(path string, generateJSON bool) error {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(filepath.Clean(path))
 	if err != nil {
 		return err
 	}
@@ -241,7 +241,7 @@ func keepOnlyDesiredStateVariable(path string, generateJSON bool) error {
 		return err
 	}
 
-	return os.WriteFile(path, data, 0644)
+	return os.WriteFile(path, data, 0600)
 }
 
 // InitRequest contains parameters for terraform init operation.
