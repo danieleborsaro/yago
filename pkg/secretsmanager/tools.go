@@ -28,8 +28,12 @@ type Lib struct {
 	tagConfig     *awssecretsmanager.TagConfiguration
 }
 
+var newSecretManager = func(awsProfile, awsRegion string, isDryRun bool) (secretManager, error) {
+	return awssecretsmanager.NewSecretManager(awsProfile, awsRegion, isDryRun)
+}
+
 func NewLib(awsProfile, awsRegion string, isDryRun bool) (*Lib, error) {
-	secMan, err := awssecretsmanager.NewSecretManager(awsProfile, awsRegion, isDryRun)
+	secMan, err := newSecretManager(awsProfile, awsRegion, isDryRun)
 	if err != nil {
 		return nil, err
 	}

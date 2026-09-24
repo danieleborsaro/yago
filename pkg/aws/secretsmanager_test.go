@@ -1,6 +1,9 @@
 package aws
 
 import (
+	"encoding/json"
+	"math"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -29,9 +32,6 @@ func Test_NewSecretManager(t *testing.T) {
 			}
 			if sm.isDryRun != tt.isDryRun {
 				t.Errorf("DryRun mismatch: got %v, want %v", sm.isDryRun, tt.isDryRun)
-			}
-			if sm.awsProfile != "default" {
-				t.Errorf("Profile mismatch: got %s, want default", sm.awsProfile)
 			}
 		})
 	}
@@ -62,23 +62,65 @@ func Test_GenerateResourcePolicy(t *testing.T) {
 	sm := newFakeAWS().secretManager(false)
 	const secretArn = "arn:aws:secretsmanager:eu-west-1:123456789012:secret:test"
 
-	if policy := sm.generateResourcePolicy("123456789012", secretArn, nil, nil, nil, nil, nil, nil); policy != "" {
-		t.Errorf("generateResourcePolicy() should return empty string for no restrictions, got %s", policy)
+	if policy, err := sm.generateResourcePolicy("123456789012", secretArn, Permissions{}); policy != "" || err != nil {
+		t.Errorf("expected no policy without permissions, got %s, %v", policy, err)
 	}
 
-	policy := sm.generateResourcePolicy("123456789012", secretArn,
-		[]string{"alice"}, []string{"admins"}, []string{"app"}, nil, []string{"ReadOnly"},
-		[]map[string]interface{}{{"Sid": "Extra"}})
-	for _, want := range []string{
-		"arn:aws:iam::123456789012:user/alice",
-		"arn:aws:iam::123456789012:group/admins",
-		"arn:aws:iam::123456789012:role/app",
-		"arn:aws:iam::123456789012:role/aws-reserved/sso.amazonaws.com/eu-west-1/AWSReservedSSO_ReadOnly*",
-		`"Sid":"Extra"`,
-	} {
-		if !strings.Contains(policy, want) {
-			t.Errorf("Policy missing %q: %s", want, policy)
+	policy, err := sm.generateResourcePolicy("123456789012", secretArn, Permissions{
+		RestrictToUsers:        []string{"alice"},
+		RestrictToRoles:        []string{"app"},
+		RestrictToAssumedRoles: []string{"deployer"},
+		RestrictToSsoPolicies:  []string{"ReadOnly"},
+		ExtraPolicyStatements:  []map[string]interface{}{{"Sid": "Extra"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var document struct {
+		Statement []map[string]interface{}
+	}
+	if err := json.Unmarshal([]byte(policy), &document); err != nil || len(document.Statement) != 3 {
+		t.Fatalf("expected three statements, got %s (%v)", policy, err)
+	}
+	deny := document.Statement[1]
+	wantDeny := map[string]interface{}{
+		"Sid":       "OnlyAllowNamedResources",
+		"Effect":    "Deny",
+		"Principal": map[string]interface{}{"AWS": "*"},
+		"Resource":  secretArn,
+		"Condition": map[string]interface{}{"ArnNotLike": map[string]interface{}{"aws:PrincipalArn": []interface{}{
+			"arn:aws:iam::123456789012:user/alice",
+			"arn:aws:iam::123456789012:role/app",
+			"arn:aws:iam::123456789012:role/deployer",
+			"arn:aws:iam::123456789012:role/aws-reserved/sso.amazonaws.com/eu-west-1/AWSReservedSSO_ReadOnly*",
+		}}},
+	}
+	for key, want := range wantDeny {
+		if !reflect.DeepEqual(deny[key], want) {
+			t.Errorf("statement %s is %v, want %v", key, deny[key], want)
 		}
+	}
+	if document.Statement[2]["Sid"] != "Extra" {
+		t.Errorf("expected the extra statement last, got %v", document.Statement[2])
+	}
+
+	policy, err = sm.generateResourcePolicy("123456789012", secretArn, Permissions{ExtraPolicyStatements: []map[string]interface{}{{"Sid": "Extra"}}})
+	if err != nil || strings.Contains(policy, "OnlyAllowNamedResources") || !strings.Contains(policy, `"Sid":"Extra"`) {
+		t.Errorf("expected only the extra statement to restrict access, got %s, %v", policy, err)
+	}
+}
+
+func Test_Permissions_Validate(t *testing.T) {
+	if err := (Permissions{RestrictToGroups: []string{"admins"}}).Validate(); err == nil || !strings.Contains(err.Error(), "restrict_to_groups") {
+		t.Errorf("expected groups to be refused, got %v", err)
+	}
+	unwritable := Permissions{ExtraPolicyStatements: []map[string]interface{}{{"Condition": math.Inf(1)}}}
+	if err := unwritable.Validate(); err == nil || !strings.Contains(err.Error(), "extra_policy_statements") {
+		t.Errorf("expected statements that aren't JSON to be refused, got %v", err)
+	}
+	if err := (Permissions{RestrictToRoles: []string{"app"}}).Validate(); err != nil {
+		t.Errorf("expected roles to be accepted, got %v", err)
 	}
 }
 
@@ -121,8 +163,21 @@ func Test_KmsAliasName(t *testing.T) {
 	}
 
 	for secretName, want := range tests {
-		if got := kmsAliasName(secretName); got != want {
-			t.Errorf("kmsAliasName(%q) = %s, want %s", secretName, got, want)
+		if got := KmsAliasName(secretName); got != want {
+			t.Errorf("KmsAliasName(%q) = %s, want %s", secretName, got, want)
+		}
+	}
+}
+
+func Test_ValidateKmsAlias(t *testing.T) {
+	for _, name := range []string{"example/app.database", "a", "my_secret-1", strings.Repeat("a", 250)} {
+		if err := ValidateKmsAlias(name); err != nil {
+			t.Errorf("ValidateKmsAlias(%q) = %v, want no error", name, err)
+		}
+	}
+	for _, name := range []string{"app/user@example.com", "a+b", "a=b", "aws/secret", strings.Repeat("a", 251)} {
+		if err := ValidateKmsAlias(name); err == nil {
+			t.Errorf("ValidateKmsAlias(%q) accepted an alias KMS rejects", name)
 		}
 	}
 }

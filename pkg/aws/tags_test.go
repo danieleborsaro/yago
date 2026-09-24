@@ -135,26 +135,28 @@ func Test_Tags_EscapesTheAwsPrefix(t *testing.T) {
 	}
 }
 
-func Test_Tags_KeepsFiftyTags(t *testing.T) {
+func Test_Tags_KeepsTheTagLimit(t *testing.T) {
 	config := exampleTagConfiguration()
 	config.CustomTagsVerbatim = map[string]string{}
 	for i := 0; i < 60; i++ {
 		config.CustomTagsVerbatim[fmt.Sprintf("Verbatim%02d", i)] = "x"
 	}
 
-	tags, dropped, err := Tags(config, ResourceTypeSecret, "example")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(tags) != maxTags {
-		t.Fatalf("got %d tags, want %d", len(tags), maxTags)
-	}
-	if tags["Name"] != "example" || tags["Foo:Business:Owner"] == "" {
-		t.Fatalf("generated tags were dropped: %s", FormatTags(tags))
-	}
-	for _, key := range dropped {
-		if !strings.HasPrefix(key, "Verbatim") {
-			t.Fatalf("dropped a generated tag: %s", key)
+	for resourceType, want := range map[string]int{ResourceTypeKmsKey: maxTags, ResourceTypeSecret: maxTags - 1} {
+		tags, dropped, err := Tags(config, resourceType, "example")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(tags) != want {
+			t.Fatalf("got %d tags for %s, want %d", len(tags), resourceType, want)
+		}
+		if tags["Name"] != "example" || tags["Foo:Business:Owner"] == "" {
+			t.Fatalf("generated tags were dropped: %s", FormatTags(tags))
+		}
+		for _, key := range dropped {
+			if !strings.HasPrefix(key, "Verbatim") {
+				t.Fatalf("dropped a generated tag: %s", key)
+			}
 		}
 	}
 }

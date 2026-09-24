@@ -13,6 +13,11 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 )
 
+var mutatingCalls = map[string]bool{
+	"CreateAlias": true, "CreateKey": true, "CreateSecret": true, "DeleteAlias": true, "DeleteSecret": true,
+	"EnableKeyRotation": true, "PutResourcePolicy": true, "RemoveRegionsFromReplication": true, "ScheduleKeyDeletion": true,
+}
+
 type fakeAWS struct {
 	accountId string
 	region    string
@@ -21,7 +26,9 @@ type fakeAWS struct {
 	keys    map[string]*fakeKey
 	aliases map[string]string
 
+	createAliasErr       error
 	putResourcePolicyErr error
+	removeReplicasErr    error
 	calls                []string
 }
 
@@ -33,6 +40,7 @@ type fakeSecret struct {
 	versionId   string
 	tags        map[string]string
 	policy      string
+	replicas    []string
 }
 
 type fakeKey struct {
@@ -54,13 +62,12 @@ func newFakeAWS() *fakeAWS {
 
 func (f *fakeAWS) secretManager(isDryRun bool) *SecretManager {
 	return &SecretManager{
-		awsProfile: "default",
-		awsRegion:  f.region,
-		isDryRun:   isDryRun,
-		smClient:   f,
-		kmsClient:  f,
-		stsClient:  f,
-		ctx:        context.Background(),
+		awsRegion: f.region,
+		isDryRun:  isDryRun,
+		smClient:  f,
+		kmsClient: f,
+		stsClient: f,
+		ctx:       context.Background(),
 	}
 }
 
@@ -76,6 +83,18 @@ func (f *fakeAWS) addSecret(name, kmsKeyId string, tags map[string]string) {
 	}
 }
 
+func (f *fakeAWS) secretByID(id string) *fakeSecret {
+	if secret, exists := f.secrets[id]; exists {
+		return secret
+	}
+	for _, secret := range f.secrets {
+		if secret.arn == id {
+			return secret
+		}
+	}
+	return nil
+}
+
 func (f *fakeAWS) record(call string) {
 	f.calls = append(f.calls, call)
 }
@@ -89,6 +108,16 @@ func (f *fakeAWS) called(call string) bool {
 	return false
 }
 
+func (f *fakeAWS) mutations() []string {
+	mutations := []string{}
+	for _, call := range f.calls {
+		if mutatingCalls[call] {
+			mutations = append(mutations, call)
+		}
+	}
+	return mutations
+}
+
 func (f *fakeAWS) GetCallerIdentity(ctx context.Context, params *sts.GetCallerIdentityInput, optFns ...func(*sts.Options)) (*sts.GetCallerIdentityOutput, error) {
 	f.record("GetCallerIdentity")
 	return &sts.GetCallerIdentityOutput{Account: aws.String(f.accountId)}, nil
@@ -99,6 +128,9 @@ func (f *fakeAWS) CreateSecret(ctx context.Context, params *secretsmanager.Creat
 	name := aws.ToString(params.Name)
 	if _, exists := f.secrets[name]; exists {
 		return nil, &types.ResourceExistsException{Message: aws.String("exists")}
+	}
+	if len(params.Tags) > maxTags {
+		return nil, &types.InvalidParameterException{Message: aws.String("too many tags")}
 	}
 	tags := map[string]string{}
 	for _, tag := range params.Tags {
@@ -115,8 +147,12 @@ func (f *fakeAWS) CreateSecret(ctx context.Context, params *secretsmanager.Creat
 func (f *fakeAWS) DeleteSecret(ctx context.Context, params *secretsmanager.DeleteSecretInput, optFns ...func(*secretsmanager.Options)) (*secretsmanager.DeleteSecretOutput, error) {
 	f.record("DeleteSecret")
 	name := aws.ToString(params.SecretId)
-	if _, exists := f.secrets[name]; !exists {
+	secret, exists := f.secrets[name]
+	if !exists {
 		return nil, &types.ResourceNotFoundException{Message: aws.String("not found")}
+	}
+	if len(secret.replicas) > 0 {
+		return nil, &types.InvalidRequestException{Message: aws.String("remove the replicas first")}
 	}
 	delete(f.secrets, name)
 	return &secretsmanager.DeleteSecretOutput{}, nil
@@ -140,6 +176,22 @@ func (f *fakeAWS) DescribeSecret(ctx context.Context, params *secretsmanager.Des
 	for _, k := range keys {
 		output.Tags = append(output.Tags, types.Tag{Key: aws.String(k), Value: aws.String(secret.tags[k])})
 	}
+	for _, region := range secret.replicas {
+		output.ReplicationStatus = append(output.ReplicationStatus, types.ReplicationStatusType{Region: aws.String(region)})
+	}
+	return output, nil
+}
+
+func (f *fakeAWS) GetResourcePolicy(ctx context.Context, params *secretsmanager.GetResourcePolicyInput, optFns ...func(*secretsmanager.Options)) (*secretsmanager.GetResourcePolicyOutput, error) {
+	f.record("GetResourcePolicy")
+	secret := f.secretByID(aws.ToString(params.SecretId))
+	if secret == nil {
+		return nil, &types.ResourceNotFoundException{Message: aws.String("not found")}
+	}
+	output := &secretsmanager.GetResourcePolicyOutput{ARN: aws.String(secret.arn)}
+	if secret.policy != "" {
+		output.ResourcePolicy = aws.String(secret.policy)
+	}
 	return output, nil
 }
 
@@ -157,12 +209,35 @@ func (f *fakeAWS) PutResourcePolicy(ctx context.Context, params *secretsmanager.
 	if f.putResourcePolicyErr != nil {
 		return nil, f.putResourcePolicyErr
 	}
-	for _, secret := range f.secrets {
-		if secret.arn == aws.ToString(params.SecretId) {
-			secret.policy = aws.ToString(params.ResourcePolicy)
+	secret := f.secretByID(aws.ToString(params.SecretId))
+	if secret == nil {
+		return nil, &types.ResourceNotFoundException{Message: aws.String("not found")}
+	}
+	secret.policy = aws.ToString(params.ResourcePolicy)
+	return &secretsmanager.PutResourcePolicyOutput{}, nil
+}
+
+func (f *fakeAWS) RemoveRegionsFromReplication(ctx context.Context, params *secretsmanager.RemoveRegionsFromReplicationInput, optFns ...func(*secretsmanager.Options)) (*secretsmanager.RemoveRegionsFromReplicationOutput, error) {
+	f.record("RemoveRegionsFromReplication")
+	if f.removeReplicasErr != nil {
+		return nil, f.removeReplicasErr
+	}
+	secret := f.secretByID(aws.ToString(params.SecretId))
+	if secret == nil {
+		return nil, &types.ResourceNotFoundException{Message: aws.String("not found")}
+	}
+	remaining := []string{}
+	for _, region := range secret.replicas {
+		removed := false
+		for _, remove := range params.RemoveReplicaRegions {
+			removed = removed || region == remove
+		}
+		if !removed {
+			remaining = append(remaining, region)
 		}
 	}
-	return &secretsmanager.PutResourcePolicyOutput{}, nil
+	secret.replicas = remaining
+	return &secretsmanager.RemoveRegionsFromReplicationOutput{}, nil
 }
 
 func (f *fakeAWS) ListAliases(ctx context.Context, params *kms.ListAliasesInput, optFns ...func(*kms.Options)) (*kms.ListAliasesOutput, error) {
@@ -186,7 +261,17 @@ func (f *fakeAWS) ListAliases(ctx context.Context, params *kms.ListAliasesInput,
 
 func (f *fakeAWS) CreateAlias(ctx context.Context, params *kms.CreateAliasInput, optFns ...func(*kms.Options)) (*kms.CreateAliasOutput, error) {
 	f.record("CreateAlias")
-	f.aliases[aws.ToString(params.AliasName)] = aws.ToString(params.TargetKeyId)
+	if f.createAliasErr != nil {
+		return nil, f.createAliasErr
+	}
+	name := aws.ToString(params.AliasName)
+	if !kmsAliasNameRe.MatchString(name) {
+		return nil, &kmstypes.InvalidAliasNameException{Message: aws.String("invalid alias name")}
+	}
+	if _, exists := f.aliases[name]; exists {
+		return nil, &kmstypes.AlreadyExistsException{Message: aws.String("alias exists")}
+	}
+	f.aliases[name] = aws.ToString(params.TargetKeyId)
 	return &kms.CreateAliasOutput{}, nil
 }
 
@@ -220,13 +305,30 @@ func (f *fakeAWS) DescribeKey(ctx context.Context, params *kms.DescribeKeyInput,
 	if !exists {
 		return nil, &kmstypes.NotFoundException{Message: aws.String("not found")}
 	}
-	return &kms.DescribeKeyOutput{KeyMetadata: &kmstypes.KeyMetadata{KeyId: aws.String(keyId), Arn: aws.String(key.arn)}}, nil
+	state := kmstypes.KeyStateEnabled
+	if key.pendingDeletion {
+		state = kmstypes.KeyStatePendingDeletion
+	}
+	return &kms.DescribeKeyOutput{KeyMetadata: &kmstypes.KeyMetadata{KeyId: aws.String(keyId), Arn: aws.String(key.arn), KeyState: state}}, nil
 }
 
 func (f *fakeAWS) EnableKeyRotation(ctx context.Context, params *kms.EnableKeyRotationInput, optFns ...func(*kms.Options)) (*kms.EnableKeyRotationOutput, error) {
 	f.record("EnableKeyRotation")
 	f.keys[aws.ToString(params.KeyId)].rotation = true
 	return &kms.EnableKeyRotationOutput{}, nil
+}
+
+func (f *fakeAWS) ListResourceTags(ctx context.Context, params *kms.ListResourceTagsInput, optFns ...func(*kms.Options)) (*kms.ListResourceTagsOutput, error) {
+	f.record("ListResourceTags")
+	key, exists := f.keys[aws.ToString(params.KeyId)]
+	if !exists {
+		return nil, &kmstypes.NotFoundException{Message: aws.String("not found")}
+	}
+	output := &kms.ListResourceTagsOutput{}
+	for tagKey, tagValue := range key.tags {
+		output.Tags = append(output.Tags, kmstypes.Tag{TagKey: aws.String(tagKey), TagValue: aws.String(tagValue)})
+	}
+	return output, nil
 }
 
 func (f *fakeAWS) ScheduleKeyDeletion(ctx context.Context, params *kms.ScheduleKeyDeletionInput, optFns ...func(*kms.Options)) (*kms.ScheduleKeyDeletionOutput, error) {

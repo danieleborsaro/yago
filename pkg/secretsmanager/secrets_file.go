@@ -16,21 +16,12 @@ var secretNameRe = regexp.MustCompile(`^[A-Za-z0-9/_+=.@-]{1,512}$`)
 type Secrets map[string]map[string]Secret
 
 type Secret struct {
-	IsCreatedHere bool              `yaml:"is_created_here"`
-	Name          string            `yaml:"name"`
-	Description   string            `yaml:"description"`
-	Versions      map[string]string `yaml:"versions"`
-	Keys          map[string]string `yaml:"keys"`
-	Permissions   Permissions       `yaml:"permissions"`
-}
-
-type Permissions struct {
-	RestrictToUsers        []string                 `yaml:"restrict_to_users"`
-	RestrictToGroups       []string                 `yaml:"restrict_to_groups"`
-	RestrictToRoles        []string                 `yaml:"restrict_to_roles"`
-	RestrictToAssumedRoles []string                 `yaml:"restrict_to_assumed_roles"`
-	RestrictToSsoPolicies  []string                 `yaml:"restrict_to_sso_policies"`
-	ExtraPolicyStatements  []map[string]interface{} `yaml:"extra_policy_statements"`
+	IsCreatedHere bool                          `yaml:"is_created_here"`
+	Name          string                        `yaml:"name"`
+	Description   string                        `yaml:"description"`
+	Versions      map[string]string             `yaml:"versions"`
+	Keys          map[string]string             `yaml:"keys"`
+	Permissions   awssecretsmanager.Permissions `yaml:"permissions"`
 }
 
 func (s Secret) KeyNames() []string {
@@ -59,14 +50,7 @@ func (s Secret) createRequest(secretTags, kmsKeyTags map[string]string) awssecre
 		IsCreatedHere:        s.IsCreatedHere,
 		SecretTags:           secretTags,
 		KmsKeyTags:           kmsKeyTags,
-		Permissions: awssecretsmanager.Permissions{
-			RestrictToUsers:        s.Permissions.RestrictToUsers,
-			RestrictToGroups:       s.Permissions.RestrictToGroups,
-			RestrictToRoles:        s.Permissions.RestrictToRoles,
-			RestrictToAssumedRoles: s.Permissions.RestrictToAssumedRoles,
-			RestrictToSsoPolicies:  s.Permissions.RestrictToSsoPolicies,
-			ExtraPolicyStatements:  s.Permissions.ExtraPolicyStatements,
-		},
+		Permissions:          s.Permissions,
 	}
 }
 
@@ -99,6 +83,7 @@ func (s Secrets) Validate() error {
 		secrets := s[region]
 
 		names := map[string]string{}
+		aliases := map[string]string{}
 		for _, key := range sortedKeys(secrets) {
 			secret := secrets[key]
 			if secret.Name == "" {
@@ -112,6 +97,21 @@ func (s Secrets) Validate() error {
 				return fmt.Errorf("secret %s in %s: name %q is also used by %s", key, region, secret.Name, other)
 			}
 			names[secret.Name] = key
+
+			if secret.IsCreatedHere {
+				if err := awssecretsmanager.ValidateKmsAlias(secret.Name); err != nil {
+					return fmt.Errorf("secret %s in %s: %w", key, region, err)
+				}
+				alias := awssecretsmanager.KmsAliasName(secret.Name)
+				if other, exists := aliases[alias]; exists {
+					return fmt.Errorf("secret %s in %s: its KMS alias %q is also the alias of %s", key, region, alias, other)
+				}
+				aliases[alias] = key
+			}
+
+			if err := secret.Permissions.Validate(); err != nil {
+				return fmt.Errorf("secret %s in %s: %w", key, region, err)
+			}
 
 			fields := map[string]string{}
 			for _, label := range sortedKeys(secret.Keys) {

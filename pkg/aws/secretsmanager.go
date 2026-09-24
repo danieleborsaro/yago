@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	stderrors "errors"
 	"fmt"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -63,12 +64,23 @@ type KmsKeyResult struct {
 }
 
 type Permissions struct {
-	RestrictToUsers        []string
-	RestrictToGroups       []string
-	RestrictToRoles        []string
-	RestrictToAssumedRoles []string
-	RestrictToSsoPolicies  []string
-	ExtraPolicyStatements  []map[string]interface{}
+	RestrictToUsers        []string                 `yaml:"restrict_to_users"`
+	RestrictToGroups       []string                 `yaml:"restrict_to_groups"`
+	RestrictToRoles        []string                 `yaml:"restrict_to_roles"`
+	RestrictToAssumedRoles []string                 `yaml:"restrict_to_assumed_roles"`
+	RestrictToSsoPolicies  []string                 `yaml:"restrict_to_sso_policies"`
+	ExtraPolicyStatements  []map[string]interface{} `yaml:"extra_policy_statements"`
+}
+
+func (p Permissions) Validate() error {
+	if len(p.RestrictToGroups) > 0 {
+		return errors.New(errors.ErrParam,
+			"restrict_to_groups can't be enforced: IAM groups aren't principals, so the policy can't match their members. List the users or roles instead")
+	}
+	if _, err := json.Marshal(p.ExtraPolicyStatements); err != nil {
+		return errors.Wrapf(errors.ErrParam, err, "extra_policy_statements can't be written as JSON")
+	}
+	return nil
 }
 
 type CreateRequest struct {
@@ -86,8 +98,10 @@ type secretsManagerAPI interface {
 	CreateSecret(ctx context.Context, params *secretsmanager.CreateSecretInput, optFns ...func(*secretsmanager.Options)) (*secretsmanager.CreateSecretOutput, error)
 	DeleteSecret(ctx context.Context, params *secretsmanager.DeleteSecretInput, optFns ...func(*secretsmanager.Options)) (*secretsmanager.DeleteSecretOutput, error)
 	DescribeSecret(ctx context.Context, params *secretsmanager.DescribeSecretInput, optFns ...func(*secretsmanager.Options)) (*secretsmanager.DescribeSecretOutput, error)
+	GetResourcePolicy(ctx context.Context, params *secretsmanager.GetResourcePolicyInput, optFns ...func(*secretsmanager.Options)) (*secretsmanager.GetResourcePolicyOutput, error)
 	GetSecretValue(ctx context.Context, params *secretsmanager.GetSecretValueInput, optFns ...func(*secretsmanager.Options)) (*secretsmanager.GetSecretValueOutput, error)
 	PutResourcePolicy(ctx context.Context, params *secretsmanager.PutResourcePolicyInput, optFns ...func(*secretsmanager.Options)) (*secretsmanager.PutResourcePolicyOutput, error)
+	RemoveRegionsFromReplication(ctx context.Context, params *secretsmanager.RemoveRegionsFromReplicationInput, optFns ...func(*secretsmanager.Options)) (*secretsmanager.RemoveRegionsFromReplicationOutput, error)
 }
 
 type kmsAPI interface {
@@ -97,6 +111,7 @@ type kmsAPI interface {
 	DeleteAlias(ctx context.Context, params *kms.DeleteAliasInput, optFns ...func(*kms.Options)) (*kms.DeleteAliasOutput, error)
 	DescribeKey(ctx context.Context, params *kms.DescribeKeyInput, optFns ...func(*kms.Options)) (*kms.DescribeKeyOutput, error)
 	EnableKeyRotation(ctx context.Context, params *kms.EnableKeyRotationInput, optFns ...func(*kms.Options)) (*kms.EnableKeyRotationOutput, error)
+	ListResourceTags(ctx context.Context, params *kms.ListResourceTagsInput, optFns ...func(*kms.Options)) (*kms.ListResourceTagsOutput, error)
 	ScheduleKeyDeletion(ctx context.Context, params *kms.ScheduleKeyDeletionInput, optFns ...func(*kms.Options)) (*kms.ScheduleKeyDeletionOutput, error)
 }
 
@@ -106,10 +121,9 @@ type stsAPI interface {
 
 // SecretManager manages AWS Secrets Manager operations for secret lifecycle management.
 type SecretManager struct {
-	awsProfile string
-	awsRegion  string
-	isDryRun   bool
-	accountId  string
+	awsRegion string
+	isDryRun  bool
+	accountId string
 
 	// AWS clients
 	smClient  secretsManagerAPI
@@ -152,13 +166,12 @@ func NewSecretManager(awsProfile, awsRegion string, isDryRun bool) (*SecretManag
 	}
 
 	return &SecretManager{
-		awsProfile: awsProfile,
-		awsRegion:  awsRegion,
-		isDryRun:   isDryRun,
-		smClient:   secretsmanager.NewFromConfig(cfg),
-		kmsClient:  kms.NewFromConfig(cfg),
-		stsClient:  sts.NewFromConfig(cfg),
-		ctx:        ctx,
+		awsRegion: awsRegion,
+		isDryRun:  isDryRun,
+		smClient:  secretsmanager.NewFromConfig(cfg),
+		kmsClient: kms.NewFromConfig(cfg),
+		stsClient: sts.NewFromConfig(cfg),
+		ctx:       ctx,
 	}, nil
 }
 
@@ -176,8 +189,20 @@ func (sm *SecretManager) AccountID() (string, error) {
 	return sm.accountId, nil
 }
 
-func kmsAliasName(secretName string) string {
+var kmsAliasNameRe = regexp.MustCompile(`^alias/[a-zA-Z0-9/_-]{1,250}$`)
+
+func KmsAliasName(secretName string) string {
 	return fmt.Sprintf("alias/%s", strings.ReplaceAll(secretName, ".", "-"))
+}
+
+func ValidateKmsAlias(secretName string) error {
+	aliasName := KmsAliasName(secretName)
+	if !kmsAliasNameRe.MatchString(aliasName) || strings.HasPrefix(aliasName, "alias/aws/") {
+		return errors.Newf(errors.ErrParam,
+			"the KMS alias of secret '%s' would be '%s', but KMS aliases may only use letters, digits and /_- (up to 256 characters) and can't start with alias/aws/",
+			secretName, aliasName)
+	}
+	return nil
 }
 
 // Create creates a new secret in AWS Secrets Manager with KMS encryption.
@@ -220,24 +245,46 @@ func (sm *SecretManager) Create(req CreateRequest) (*SecretCreationResult, bool,
 	}
 
 	// Handle isCreatedHere=True: create resources with idempotency
-	exists, _, err := sm.checkSecretExists(name)
+	if err := ValidateKmsAlias(name); err != nil {
+		return nil, false, err
+	}
+
+	exists, info, err := sm.checkSecretExists(name)
 	if err != nil {
 		return nil, false, err
 	}
 
 	if exists {
 		logging.Warn("Secret '%s' already exists", name)
-		return nil, false, nil
+		return nil, false, sm.updateResourcePolicy(name, info, accountId, req.Permissions)
 	}
 
 	logging.Info("Secret '%s' does not exist, will create", name)
 
-	aliasName := kmsAliasName(name)
+	aliasName := KmsAliasName(name)
+	existingKey, err := sm.kmsKeyByAlias(aliasName)
+	if err != nil {
+		return nil, false, err
+	}
+	if existingKey != nil {
+		isForSecret, err := sm.isKeyForSecret(aws.ToString(existingKey.KeyId), name)
+		if err != nil {
+			return nil, false, err
+		}
+		if !isForSecret {
+			return nil, false, errors.Newf(errors.ErrFail,
+				"KMS alias '%s' already exists for a key that was not created for secret '%s'", aliasName, name)
+		}
+		if existingKey.KeyState == kmstypes.KeyStatePendingDeletion {
+			return nil, false, errors.Newf(errors.ErrFail,
+				"KMS key '%s' behind alias '%s' is pending deletion", aws.ToString(existingKey.KeyId), aliasName)
+		}
+	}
 
 	// Handle dry-run mode
 	if sm.isDryRun {
 		logging.Info("[Dry-Run] Would create secret '%s' with KMS key", name)
-		return &SecretCreationResult{
+		result := &SecretCreationResult{
 			ARN:          fmt.Sprintf("arn:aws:secretsmanager:%s:%s:secret:%s-XXXXXX", sm.awsRegion, accountId, name),
 			ID:           name,
 			Name:         name,
@@ -245,23 +292,25 @@ func (sm *SecretManager) Create(req CreateRequest) (*SecretCreationResult, bool,
 			KmsKeyArn:    fmt.Sprintf("arn:aws:kms:%s:%s:key/XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX", sm.awsRegion, accountId),
 			KmsAliasName: aliasName,
 			VersionId:    "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX",
-		}, true, nil
+		}
+		if existingKey != nil {
+			result.KmsKeyId, result.KmsKeyArn = aws.ToString(existingKey.KeyId), aws.ToString(existingKey.Arn)
+		}
+		return result, true, nil
 	}
 
 	// Step 1: Create or get KMS key
-	kmsExists, existingKeyId, existingKeyArn, err := sm.checkKmsKeyExists(aliasName)
-	if err != nil {
-		return nil, false, err
-	}
-
 	var kmsInfo *KmsKeyResult
 
-	if kmsExists {
+	if existingKey != nil {
 		logging.Warn("KMS key with alias '%s' already exists, using existing key", aliasName)
 		kmsInfo = &KmsKeyResult{
-			KeyId:     existingKeyId,
-			KeyArn:    existingKeyArn,
+			KeyId:     aws.ToString(existingKey.KeyId),
+			KeyArn:    aws.ToString(existingKey.Arn),
 			AliasName: aliasName,
+		}
+		if err := sm.enableKeyRotation(kmsInfo.KeyId); err != nil {
+			return nil, false, err
 		}
 	} else {
 		logging.Info("Creating new KMS key for secret '%s'", name)
@@ -308,20 +357,13 @@ func (sm *SecretManager) Create(req CreateRequest) (*SecretCreationResult, bool,
 	logging.Info("Created secret '%s' (ARN: %s)", name, secretArn)
 
 	// Step 4: Apply resource policy if restrictions specified
-	resourcePolicy := sm.generateResourcePolicy(accountId, secretArn, req.Permissions.RestrictToUsers,
-		req.Permissions.RestrictToGroups, req.Permissions.RestrictToRoles, req.Permissions.RestrictToAssumedRoles,
-		req.Permissions.RestrictToSsoPolicies, req.Permissions.ExtraPolicyStatements)
-
-	if resourcePolicy != "" {
-		logging.Info("Applying resource policy to secret '%s'", name)
-		_, err := sm.smClient.PutResourcePolicy(sm.ctx, &secretsmanager.PutResourcePolicyInput{
-			SecretId:       aws.String(secretArn),
-			ResourcePolicy: aws.String(resourcePolicy),
-		})
-		if err != nil {
-			return nil, false, errors.Wrapf(errors.ErrFail, err,
-				"secret '%s' was created, but its resource policy could not be applied", name)
-		}
+	resourcePolicy, err := sm.generateResourcePolicy(accountId, secretArn, req.Permissions)
+	if err == nil && resourcePolicy != "" {
+		err = sm.putResourcePolicy(name, secretArn, resourcePolicy)
+	}
+	if err != nil {
+		return nil, false, errors.Wrapf(errors.ErrFail, err,
+			"secret '%s' was created, but its resource policy could not be applied. Run create again to apply it", name)
 	}
 
 	return &SecretCreationResult{
@@ -335,13 +377,63 @@ func (sm *SecretManager) Create(req CreateRequest) (*SecretCreationResult, bool,
 	}, true, nil
 }
 
+// Existing secrets get the policy too, so a change to permissions, or a failed first attempt, is applied.
+func (sm *SecretManager) updateResourcePolicy(name string, info *secretInfo, accountId string, permissions Permissions) error {
+	resourcePolicy, err := sm.generateResourcePolicy(accountId, info.ARN, permissions)
+	if err != nil || resourcePolicy == "" {
+		return err
+	}
+
+	output, err := sm.smClient.GetResourcePolicy(sm.ctx, &secretsmanager.GetResourcePolicyInput{
+		SecretId: aws.String(info.ARN),
+	})
+	if err != nil {
+		return errors.Wrapf(errors.ErrFail, err, "failed to read the resource policy of secret '%s'", name)
+	}
+	if isSamePolicy(aws.ToString(output.ResourcePolicy), resourcePolicy) {
+		logging.Debug("Secret '%s' already has its resource policy", name)
+		return nil
+	}
+
+	if info.Tags[isCreatedHereTagKey] != isCreatedHereTagValue {
+		return errors.Newf(errors.ErrFail, "secret '%s' was not created by yago (it has no %s=%s tag), so its resource policy is not changed",
+			name, isCreatedHereTagKey, isCreatedHereTagValue)
+	}
+
+	if sm.isDryRun {
+		logging.Info("[Dry-Run] Would apply resource policy to secret '%s'", name)
+		return nil
+	}
+	if err := sm.putResourcePolicy(name, info.ARN, resourcePolicy); err != nil {
+		return errors.Wrapf(errors.ErrFail, err, "failed to apply the resource policy of secret '%s'", name)
+	}
+	return nil
+}
+
+func (sm *SecretManager) putResourcePolicy(name, secretArn, resourcePolicy string) error {
+	logging.Info("Applying resource policy to secret '%s'", name)
+	_, err := sm.smClient.PutResourcePolicy(sm.ctx, &secretsmanager.PutResourcePolicyInput{
+		SecretId:       aws.String(secretArn),
+		ResourcePolicy: aws.String(resourcePolicy),
+	})
+	return err
+}
+
+func isSamePolicy(current, desired string) bool {
+	var currentPolicy, desiredPolicy interface{}
+	if json.Unmarshal([]byte(current), &currentPolicy) != nil || json.Unmarshal([]byte(desired), &desiredPolicy) != nil {
+		return false
+	}
+	return reflect.DeepEqual(currentPolicy, desiredPolicy)
+}
+
 func (sm *SecretManager) describeKmsKey(secretName, kmsKeyId string) (string, string) {
 	if kmsKeyId == "" || strings.HasPrefix(kmsKeyId, "aws/") {
 		return kmsKeyId, kmsKeyId
 	}
 
 	kmsKeyArn := kmsKeyId
-	aliasName := kmsAliasName(secretName)
+	aliasName := KmsAliasName(secretName)
 
 	keyOutput, err := sm.kmsClient.DescribeKey(sm.ctx, &kms.DescribeKeyInput{
 		KeyId: aws.String(kmsKeyId),
@@ -385,23 +477,7 @@ func (sm *SecretManager) Validate(
 	}
 
 	// Get KMS key details
-	kmsKeyArn := kmsKeyId
-	kmsAliasName := kmsKeyId
-	if !strings.HasPrefix(kmsKeyId, "aws/") {
-		keyOutput, err := sm.kmsClient.DescribeKey(sm.ctx, &kms.DescribeKeyInput{
-			KeyId: aws.String(kmsKeyId),
-		})
-		if err == nil && keyOutput != nil && keyOutput.KeyMetadata != nil {
-			kmsKeyArn = aws.ToString(keyOutput.KeyMetadata.Arn)
-		}
-
-		aliasesOutput, err := sm.kmsClient.ListAliases(sm.ctx, &kms.ListAliasesInput{
-			KeyId: aws.String(kmsKeyId),
-		})
-		if err == nil && len(aliasesOutput.Aliases) > 0 {
-			kmsAliasName = aws.ToString(aliasesOutput.Aliases[0].AliasName)
-		}
-	}
+	kmsKeyArn, aliasName := sm.describeKmsKey(secretName, kmsKeyId)
 
 	// Determine which versions to validate
 	versionsToValidate := versions
@@ -493,7 +569,7 @@ func (sm *SecretManager) Validate(
 		ARN:               secretArn,
 		KmsKeyId:          kmsKeyId,
 		KmsKeyArn:         kmsKeyArn,
-		KmsAliasName:      kmsAliasName,
+		KmsAliasName:      aliasName,
 	}, nil
 }
 
@@ -593,34 +669,35 @@ func secretsManagerTags(tags map[string]string) []types.Tag {
 	return smTags
 }
 
-// checkKmsKeyExists checks if a KMS key exists by alias.
-func (sm *SecretManager) checkKmsKeyExists(aliasName string) (bool, string, string, error) {
-	paginator := kms.NewListAliasesPaginator(sm.kmsClient, &kms.ListAliasesInput{})
-	for paginator.HasMorePages() {
-		listOutput, err := paginator.NextPage(sm.ctx)
-		if err != nil {
-			return false, "", "", errors.Wrapf(errors.ErrFail, err, "failed to list KMS aliases")
+// kmsKeyByAlias returns nil if the alias doesn't exist.
+func (sm *SecretManager) kmsKeyByAlias(aliasName string) (*kmstypes.KeyMetadata, error) {
+	describeOutput, err := sm.kmsClient.DescribeKey(sm.ctx, &kms.DescribeKeyInput{
+		KeyId: aws.String(aliasName),
+	})
+	if err != nil {
+		var notFound *kmstypes.NotFoundException
+		if stderrors.As(err, &notFound) {
+			return nil, nil
 		}
+		return nil, errors.Wrapf(errors.ErrFail, err, "failed to look up KMS alias '%s'", aliasName)
+	}
+	return describeOutput.KeyMetadata, nil
+}
 
-		for _, alias := range listOutput.Aliases {
-			if aws.ToString(alias.AliasName) == aliasName {
-				keyId := aws.ToString(alias.TargetKeyId)
-
-				// Get key ARN
-				describeOutput, err := sm.kmsClient.DescribeKey(sm.ctx, &kms.DescribeKeyInput{
-					KeyId: aws.String(keyId),
-				})
-				if err != nil {
-					return true, keyId, "", nil // Return key ID even if we can't get ARN
-				}
-
-				keyArn := aws.ToString(describeOutput.KeyMetadata.Arn)
-				return true, keyId, keyArn, nil
-			}
+// Secret names that differ only by '.' and '-' get the same alias, so a key is only the secret's own if its Name tag says so.
+func (sm *SecretManager) isKeyForSecret(keyId, secretName string) (bool, error) {
+	tagsOutput, err := sm.kmsClient.ListResourceTags(sm.ctx, &kms.ListResourceTagsInput{
+		KeyId: aws.String(keyId),
+	})
+	if err != nil {
+		return false, errors.Wrapf(errors.ErrFail, err, "failed to read the tags of KMS key '%s'", keyId)
+	}
+	for _, tag := range tagsOutput.Tags {
+		if aws.ToString(tag.TagKey) == nameTagKey {
+			return aws.ToString(tag.TagValue) == secretName, nil
 		}
 	}
-
-	return false, "", "", nil
+	return false, nil
 }
 
 // createKmsKeyForSecret creates a new KMS key with policy.
@@ -672,23 +749,25 @@ func (sm *SecretManager) createKmsKeyForSecret(
 	keyId := aws.ToString(createKeyOutput.KeyMetadata.KeyId)
 	keyArn := aws.ToString(createKeyOutput.KeyMetadata.Arn)
 
-	// Enable automatic key rotation
-	logging.Debug("Enabling automatic key rotation for KMS key %s", keyId)
-	_, err = sm.kmsClient.EnableKeyRotation(sm.ctx, &kms.EnableKeyRotationInput{
-		KeyId: aws.String(keyId),
-	})
-	if err != nil {
-		return nil, errors.Wrapf(errors.ErrFail, err, "failed to enable rotation of KMS key '%s'", keyId)
-	}
-
 	// Create alias
-	aliasName := kmsAliasName(secretName)
+	aliasName := KmsAliasName(secretName)
 	_, err = sm.kmsClient.CreateAlias(sm.ctx, &kms.CreateAliasInput{
 		AliasName:   aws.String(aliasName),
 		TargetKeyId: aws.String(keyId),
 	})
 	if err != nil {
-		return nil, errors.Wrapf(errors.ErrFail, err, "failed to create KMS alias")
+		// A retry finds the key by its alias, so without one the key would be left behind.
+		if deleteErr := sm.deleteKmsKey(keyId); deleteErr != nil {
+			return nil, errors.Wrapf(errors.ErrFail, err,
+				"failed to create KMS alias '%s', and the new KMS key '%s' could not be scheduled for deletion (%v)", aliasName, keyId, deleteErr)
+		}
+		return nil, errors.Wrapf(errors.ErrFail, err,
+			"failed to create KMS alias '%s', so the new KMS key '%s' was scheduled for deletion", aliasName, keyId)
+	}
+
+	// Enable automatic key rotation
+	if err := sm.enableKeyRotation(keyId); err != nil {
+		return nil, err
 	}
 
 	logging.Debug("Created KMS key %s with alias %s (auto-rotation enabled)", keyId, aliasName)
@@ -698,6 +777,17 @@ func (sm *SecretManager) createKmsKeyForSecret(
 		KeyArn:    keyArn,
 		AliasName: aliasName,
 	}, nil
+}
+
+func (sm *SecretManager) enableKeyRotation(keyId string) error {
+	logging.Debug("Enabling automatic key rotation for KMS key %s", keyId)
+	_, err := sm.kmsClient.EnableKeyRotation(sm.ctx, &kms.EnableKeyRotationInput{
+		KeyId: aws.String(keyId),
+	})
+	if err != nil {
+		return errors.Wrapf(errors.ErrFail, err, "failed to enable rotation of KMS key '%s'", keyId)
+	}
+	return nil
 }
 
 // generateKmsKeyPolicy generates the KMS key policy JSON.
@@ -740,48 +830,35 @@ func (sm *SecretManager) generateKmsKeyPolicy(accountId string) (string, error) 
 }
 
 // generateResourcePolicy generates IAM resource policy for secret access restrictions.
-func (sm *SecretManager) generateResourcePolicy(
-	accountId string,
-	secretArn string,
-	restrictToUsers []string,
-	restrictToGroups []string,
-	restrictToRoles []string,
-	restrictToAssumedRoles []string,
-	restrictToSsoPolicies []string,
-	extraPolicyStatements []map[string]interface{},
-) string {
-	// Check if any restrictions specified
-	hasRestrictions := len(restrictToUsers) > 0 || len(restrictToGroups) > 0 ||
-		len(restrictToRoles) > 0 || len(restrictToAssumedRoles) > 0 ||
-		len(restrictToSsoPolicies) > 0 || len(extraPolicyStatements) > 0
-
-	if !hasRestrictions {
-		return "" // No policy needed
+func (sm *SecretManager) generateResourcePolicy(accountId string, secretArn string, permissions Permissions) (string, error) {
+	if err := permissions.Validate(); err != nil {
+		return "", err
 	}
 
 	// Build principal ARNs
 	principalArns := []string{}
 
-	for _, user := range restrictToUsers {
+	for _, user := range permissions.RestrictToUsers {
 		principalArns = append(principalArns, fmt.Sprintf("arn:aws:iam::%s:user/%s", accountId, user))
 	}
 
-	for _, group := range restrictToGroups {
-		principalArns = append(principalArns, fmt.Sprintf("arn:aws:iam::%s:group/%s", accountId, group))
-	}
-
-	for _, role := range restrictToRoles {
+	for _, role := range permissions.RestrictToRoles {
 		principalArns = append(principalArns, fmt.Sprintf("arn:aws:iam::%s:role/%s", accountId, role))
 	}
 
-	for _, role := range restrictToAssumedRoles {
+	for _, role := range permissions.RestrictToAssumedRoles {
 		principalArns = append(principalArns, fmt.Sprintf("arn:aws:iam::%s:role/%s", accountId, role))
 	}
 
-	for _, policy := range restrictToSsoPolicies {
+	for _, policy := range permissions.RestrictToSsoPolicies {
 		principalArns = append(principalArns,
 			fmt.Sprintf("arn:aws:iam::%s:role/aws-reserved/sso.amazonaws.com/%s/AWSReservedSSO_%s*",
 				accountId, sm.awsRegion, policy))
+	}
+
+	// Check if any restrictions specified
+	if len(principalArns) == 0 && len(permissions.ExtraPolicyStatements) == 0 {
+		return "", nil // No policy needed
 	}
 
 	// Build policy statements
@@ -795,9 +872,16 @@ func (sm *SecretManager) generateResourcePolicy(
 			"Action":   "secretsmanager:*",
 			"Resource": secretArn,
 		},
-		{
+	}
+
+	if len(principalArns) > 0 {
+		// An Allow can't restrict anyone the account already allows, so everyone else is denied.
+		policyStatements = append(policyStatements, map[string]interface{}{
 			"Sid":    "OnlyAllowNamedResources",
-			"Effect": "Allow",
+			"Effect": "Deny",
+			"Principal": map[string]interface{}{
+				"AWS": "*",
+			},
 			"Action": []string{
 				"secretsmanager:DeleteSecret",
 				"secretsmanager:DeleteResourcePolicy",
@@ -811,17 +895,15 @@ func (sm *SecretManager) generateResourcePolicy(
 			},
 			"Resource": secretArn,
 			"Condition": map[string]interface{}{
-				"ArnEquals": map[string]interface{}{
+				"ArnNotLike": map[string]interface{}{
 					"aws:PrincipalArn": principalArns,
 				},
 			},
-		},
+		})
 	}
 
 	// Append extra policy statements
-	if len(extraPolicyStatements) > 0 {
-		policyStatements = append(policyStatements, extraPolicyStatements...)
-	}
+	policyStatements = append(policyStatements, permissions.ExtraPolicyStatements...)
 
 	policy := map[string]interface{}{
 		"Version":   "2012-10-17",
@@ -830,11 +912,10 @@ func (sm *SecretManager) generateResourcePolicy(
 
 	policyBytes, err := json.Marshal(policy)
 	if err != nil {
-		logging.Warn("Failed to marshal resource policy: %v", err)
-		return ""
+		return "", errors.Wrapf(errors.ErrParse, err, "failed to marshal resource policy")
 	}
 
-	return string(policyBytes)
+	return string(policyBytes), nil
 }
 
 // generatePlaceholderSecretString generates a placeholder secret JSON.
@@ -888,16 +969,21 @@ func (sm *SecretManager) Destroy(secretName string) error {
 	}
 
 	// Only the key Create made for this secret is deleted: a key it merely uses may encrypt other secrets too.
-	aliasName := kmsAliasName(secretName)
+	aliasName := KmsAliasName(secretName)
 	isKeyCreatedForSecret := false
 	if info.KmsKeyId != "" && !strings.HasPrefix(info.KmsKeyId, "aws/") {
-		aliasExists, aliasKeyId, aliasKeyArn, err := sm.checkKmsKeyExists(aliasName)
+		aliasKey, err := sm.kmsKeyByAlias(aliasName)
 		if err != nil {
 			return err
 		}
-		isKeyCreatedForSecret = aliasExists && keyMatches(info.KmsKeyId, aliasKeyId, aliasKeyArn)
+		if aliasKey != nil && keyMatches(info.KmsKeyId, aws.ToString(aliasKey.KeyId), aws.ToString(aliasKey.Arn)) {
+			isKeyCreatedForSecret, err = sm.isKeyForSecret(aws.ToString(aliasKey.KeyId), secretName)
+			if err != nil {
+				return err
+			}
+		}
 		if !isKeyCreatedForSecret {
-			logging.Info("KMS key '%s' was not created for secret '%s' (no %s), so it is kept", info.KmsKeyId, secretName, aliasName)
+			logging.Info("KMS key '%s' was not created for secret '%s', so it is kept", info.KmsKeyId, secretName)
 		}
 	}
 
@@ -916,12 +1002,13 @@ func (sm *SecretManager) Destroy(secretName string) error {
 
 	// Step 3: Delete replicas in other regions first
 	if len(info.ReplicaRegions) > 0 {
-		logging.Info("Destroying %d replicas in other regions", len(info.ReplicaRegions))
-		for _, region := range info.ReplicaRegions {
-			if err := sm.deleteSecretInRegion(secretName, region); err != nil {
-				logging.Warn("Failed to delete replica in region '%s': %v", region, err)
-				// Continue with other regions
-			}
+		logging.Info("Destroying replicas in %s", strings.Join(info.ReplicaRegions, ", "))
+		_, err := sm.smClient.RemoveRegionsFromReplication(sm.ctx, &secretsmanager.RemoveRegionsFromReplicationInput{
+			SecretId:             aws.String(secretName),
+			RemoveReplicaRegions: info.ReplicaRegions,
+		})
+		if err != nil {
+			return errors.Wrapf(errors.ErrFail, err, "failed to delete the replicas of secret '%s'", secretName)
 		}
 	}
 
@@ -973,33 +1060,6 @@ func (sm *SecretManager) deleteSecret(secretName string) error {
 	}
 
 	logging.Info("Successfully deleted secret '%s'", secretName)
-	return nil
-}
-
-// deleteSecretInRegion deletes a secret replica from a specific region.
-func (sm *SecretManager) deleteSecretInRegion(secretName, region string) error {
-	logging.Debug("Deleting secret replica '%s' from region '%s'", secretName, region)
-
-	// Create a new SM client for the target region
-	cfg, err := config.LoadDefaultConfig(sm.ctx,
-		config.WithRegion(region),
-		config.WithSharedConfigProfile(sm.awsProfile),
-	)
-	if err != nil {
-		return errors.Wrapf(errors.ErrFail, err, "failed to load config for region '%s'", region)
-	}
-
-	regionalSmClient := secretsmanager.NewFromConfig(cfg)
-	_, err = regionalSmClient.DeleteSecret(sm.ctx, &secretsmanager.DeleteSecretInput{
-		SecretId:                   aws.String(secretName),
-		ForceDeleteWithoutRecovery: aws.Bool(true),
-	})
-
-	if err != nil {
-		return errors.Wrapf(errors.ErrFail, err, "failed to delete secret replica in region '%s'", region)
-	}
-
-	logging.Info("Successfully deleted secret replica '%s' from region '%s'", secretName, region)
 	return nil
 }
 
