@@ -2,6 +2,7 @@ package wrapper
 
 import (
 	"fmt"
+	"sort"
 	"sync"
 
 	"github.com/spf13/cobra"
@@ -70,7 +71,8 @@ func GetWrapper(name string) (WrapperFactory, error) {
 
 	factory, exists := registry[name]
 	if !exists {
-		return nil, fmt.Errorf("wrapper '%s' not found. Available wrappers: %v", name, ListWrappers())
+		// Use the unlocked helper: taking RLock again here can deadlock if a writer is waiting.
+		return nil, fmt.Errorf("wrapper '%s' not found. Available wrappers: %v", name, sortedWrapperNames())
 	}
 
 	return factory, nil
@@ -82,20 +84,16 @@ func ListWrappers() []string {
 	registryMu.RLock()
 	defer registryMu.RUnlock()
 
+	return sortedWrapperNames()
+}
+
+// sortedWrapperNames expects the caller to hold registryMu.
+func sortedWrapperNames() []string {
 	names := make([]string, 0, len(registry))
 	for name := range registry {
 		names = append(names, name)
 	}
-
-	// Sort for consistent output
-	// Using a simple bubble sort to avoid importing "sort" package
-	for i := 0; i < len(names); i++ {
-		for j := i + 1; j < len(names); j++ {
-			if names[i] > names[j] {
-				names[i], names[j] = names[j], names[i]
-			}
-		}
-	}
+	sort.Strings(names)
 
 	return names
 }
