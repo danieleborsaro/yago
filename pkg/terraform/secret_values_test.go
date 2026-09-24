@@ -124,9 +124,10 @@ func TestResolveSecretVariablesFailsClosed(t *testing.T) {
 			t.Errorf("secret leaked in error: %v", err)
 		}
 	}
-	reader := &fakeSecretValueReader{err: errors.New("reader included secret-payload-marker")}
-	if _, err := resolveSecretVariables(map[string]SecretVariableBinding{"password": {SecretID: "secret"}}, reader); err == nil || strings.Contains(err.Error(), "secret-payload-marker") {
-		t.Fatalf("reader errors must be sanitized: %v", err)
+	reader := &fakeSecretValueReader{err: errors.New("AccessDeniedException")}
+	if _, err := resolveSecretVariables(map[string]SecretVariableBinding{"password": {SecretID: "secret"}}, reader); err == nil ||
+		!strings.Contains(err.Error(), `"password"`) || !strings.Contains(err.Error(), "AccessDeniedException") {
+		t.Fatalf("reader errors must name the variable and keep their cause: %v", err)
 	}
 	if _, err := resolveSecretVariables(map[string]SecretVariableBinding{"password": {}}, reader); err == nil || len(reader.calls) != 1 {
 		t.Fatal("invalid bindings must be rejected before reading any secret")
