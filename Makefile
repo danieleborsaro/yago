@@ -111,7 +111,7 @@ pre-commit-update: ## Update pre-commit hooks
 # Security scanning
 security-scan: ## Run security scanner
 	@echo "🔒 Running security scan..."
-	golangci-lint run --disable-all -E gosec --timeout=5m
+	golangci-lint run --default=none -E gosec --timeout=5m
 	@echo "✅ Security scan completed"
 
 format: lint-fix ## Format code (alias for lint-fix)

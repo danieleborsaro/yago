@@ -1,0 +1,14 @@
+---
+# CI only reports new issues, as the existing code still has findings.
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: standard
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
