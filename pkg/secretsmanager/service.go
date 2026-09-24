@@ -55,7 +55,7 @@ func (s *Service) PostConfigurationAssemble(req wrapper.AssembleRequest, respons
 		return errors.NewConfigurationMalformedError("the assembled configuration has no content")
 	}
 
-	content, ok := normalize(response.AssembledConfigurationContent).(map[string]interface{})
+	content, ok := wrapper.NormalizeMapForJSON(response.AssembledConfigurationContent).(map[string]interface{})
 	if !ok {
 		return errors.NewConfigurationMalformedError("the assembled configuration is not a map")
 	}
@@ -106,29 +106,4 @@ func mergeProjectProperties(content map[string]interface{}) (map[string]interfac
 	}
 
 	return merged, nil
-}
-
-func normalize(value interface{}) interface{} {
-	switch v := value.(type) {
-	case map[string]interface{}:
-		normalized := make(map[string]interface{}, len(v))
-		for key, child := range v {
-			normalized[key] = normalize(child)
-		}
-		return normalized
-	case map[interface{}]interface{}:
-		normalized := make(map[string]interface{}, len(v))
-		for key, child := range v {
-			normalized[fmt.Sprint(key)] = normalize(child)
-		}
-		return normalized
-	case []interface{}:
-		normalized := make([]interface{}, len(v))
-		for i, child := range v {
-			normalized[i] = normalize(child)
-		}
-		return normalized
-	default:
-		return value
-	}
 }
