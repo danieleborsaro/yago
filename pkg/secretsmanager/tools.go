@@ -116,7 +116,7 @@ func (l *Lib) create(showNew bool) ([]*awssecretsmanager.SecretCreationResult, e
 		var secretTags, kmsKeyTags map[string]string
 		if secret.IsCreatedHere {
 			var err error
-			secretTags, kmsKeyTags, err = l.tags(secret.Name)
+			secretTags, kmsKeyTags, err = l.tags(secret)
 			if err != nil {
 				return nil, err
 			}
@@ -207,26 +207,29 @@ func (l *Lib) Destroy(secretName string) error {
 	return l.secMan.Destroy(secretName)
 }
 
-func (l *Lib) tags(secretName string) (map[string]string, map[string]string, error) {
+func (l *Lib) tags(secret Secret) (map[string]string, map[string]string, error) {
 	config, err := l.tagConfiguration()
 	if err != nil {
 		return nil, nil, err
 	}
 
-	secretTags, dropped, err := awssecretsmanager.Tags(config, awssecretsmanager.ResourceTypeSecret, secretName)
+	secretTags, dropped, err := awssecretsmanager.Tags(config, awssecretsmanager.ResourceTypeSecret, secret.Name)
 	if err != nil {
 		return nil, nil, err
 	}
-	warnDroppedTags(secretName, dropped)
+	warnDroppedTags(secret.Name, dropped)
+	logging.Debug("Tags for secret %s:\n%s", secret.Name, awssecretsmanager.FormatTags(secretTags))
 
-	kmsKeyTags, dropped, err := awssecretsmanager.Tags(config, awssecretsmanager.ResourceTypeKmsKey, secretName)
+	if !secret.createsKmsKey() {
+		return secretTags, nil, nil
+	}
+
+	kmsKeyTags, dropped, err := awssecretsmanager.Tags(config, awssecretsmanager.ResourceTypeKmsKey, secret.Name)
 	if err != nil {
 		return nil, nil, err
 	}
-	warnDroppedTags("the KMS key of "+secretName, dropped)
-
-	logging.Debug("Tags for secret %s:\n%s", secretName, awssecretsmanager.FormatTags(secretTags))
-	logging.Debug("Tags for the KMS key of %s:\n%s", secretName, awssecretsmanager.FormatTags(kmsKeyTags))
+	warnDroppedTags("the KMS key of "+secret.Name, dropped)
+	logging.Debug("Tags for the KMS key of %s:\n%s", secret.Name, awssecretsmanager.FormatTags(kmsKeyTags))
 
 	return secretTags, kmsKeyTags, nil
 }

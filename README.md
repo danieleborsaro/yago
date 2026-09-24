@@ -144,6 +144,8 @@ secrets:
       is_created_here: true       # this configuration creates the secret; false means it must already exist
       name: my-app/database       # the secret's name in Secrets Manager
       description: Database credentials
+      encryption: kms             # optional: kms (the default), or sse for the AWS managed key
+      kms_key_id: alias/my-app    # optional, with kms: an existing key (ID, ARN or alias) instead of a new one
       versions:                   # version IDs (or stages) in use
         version_a: 6324c1f6-e0eb-4066-af51-29059f772d48
       keys:                       # the fields of the secret's JSON value; none means plain text
@@ -172,7 +174,7 @@ the environment (default `all`).
 |---|---|
 | `assemble -C <dir>` | Writes the assembled desired state and configuration to `<dir>`. Doesn't contact AWS. |
 | `plan` | Shows the secrets `create` would create, and the resource policies it would apply. |
-| `create` | Creates each of the region's `is_created_here` secrets that doesn't exist yet: first a KMS key of its own (`alias/<secret name>` with dots replaced by dashes, rotation on), then the secret, with the value `placeholder` in every field (base64-encoded for fields ending in `_b64`), and a resource policy if `permissions` is set. The alias must be one KMS accepts, so these names can't use `+`, `=` or `@`, and two secrets can't share an alias. Existing secrets are left as they are, apart from their resource policy. Secrets not created here must already exist. `-n`, or `IS_DRY_RUN=1`, only shows what it would do. |
+| `create` | Creates each of the region's `is_created_here` secrets that doesn't exist yet: first a KMS key of its own (`alias/<secret name>` with dots replaced by dashes, rotation on), unless `kms_key_id` names one or `encryption` is `sse`, then the secret, with the value `placeholder` in every field (base64-encoded for fields ending in `_b64`), and a resource policy if `permissions` is set. The alias of a key it creates must be one KMS accepts, so those secrets' names can't use `+`, `=` or `@`, and two of them can't share an alias. Existing secrets are left as they are, apart from their resource policy. Secrets not created here must already exist. `-n`, or `IS_DRY_RUN=1`, only shows what it would do. |
 | `validate` | Reads each secret at the versions in `versions`, and fails if its fields don't match `keys`. |
 | `destroy` | Asks, then immediately deletes the region's `is_created_here` secrets, with their replicas, KMS key and alias. It only deletes secrets `create` made, which have its `isCreatedHere` tag, and keeps a KMS key that isn't the secret's own. `-f` doesn't ask; `--dry-run` shows what it would do. |
 

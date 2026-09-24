@@ -19,6 +19,8 @@ type Secret struct {
 	IsCreatedHere bool                          `yaml:"is_created_here"`
 	Name          string                        `yaml:"name"`
 	Description   string                        `yaml:"description"`
+	Encryption    string                        `yaml:"encryption"`
+	KmsKeyId      string                        `yaml:"kms_key_id"`
 	Versions      map[string]string             `yaml:"versions"`
 	Keys          map[string]string             `yaml:"keys"`
 	Permissions   awssecretsmanager.Permissions `yaml:"permissions"`
@@ -41,6 +43,10 @@ func (s Secret) VersionValues() []string {
 	return values
 }
 
+func (s Secret) createsKmsKey() bool {
+	return s.IsCreatedHere && s.Encryption != awssecretsmanager.EncryptionSse && s.KmsKeyId == ""
+}
+
 func (s Secret) createRequest(secretTags, kmsKeyTags map[string]string) awssecretsmanager.CreateRequest {
 	return awssecretsmanager.CreateRequest{
 		Name:                 s.Name,
@@ -48,6 +54,8 @@ func (s Secret) createRequest(secretTags, kmsKeyTags map[string]string) awssecre
 		PlaceholderKeys:      s.KeyNames(),
 		PlaintextPlaceholder: awssecretsmanager.PlaceholderValue,
 		IsCreatedHere:        s.IsCreatedHere,
+		Encryption:           s.Encryption,
+		KmsKeyId:             s.KmsKeyId,
 		SecretTags:           secretTags,
 		KmsKeyTags:           kmsKeyTags,
 		Permissions:          s.Permissions,
@@ -98,7 +106,18 @@ func (s Secrets) Validate() error {
 			}
 			names[secret.Name] = key
 
-			if secret.IsCreatedHere {
+			switch secret.Encryption {
+			case "", awssecretsmanager.EncryptionKms:
+			case awssecretsmanager.EncryptionSse:
+				if secret.KmsKeyId != "" {
+					return fmt.Errorf("secret %s in %s: kms_key_id can't be used with encryption: %s", key, region, secret.Encryption)
+				}
+			default:
+				return fmt.Errorf("secret %s in %s: encryption must be %s or %s, not %q",
+					key, region, awssecretsmanager.EncryptionKms, awssecretsmanager.EncryptionSse, secret.Encryption)
+			}
+
+			if secret.createsKmsKey() {
 				if err := awssecretsmanager.ValidateKmsAlias(secret.Name); err != nil {
 					return fmt.Errorf("secret %s in %s: %w", key, region, err)
 				}
