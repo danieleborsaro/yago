@@ -175,6 +175,34 @@ desiredstate:
 - `gitops.getEnvValue(VAR_NAME, default)`: Get environment variable with fallback
 - `gitops.getYamlValue(path.to.value)`: Get value from YAML document
 
+## Terraform Secret Inputs
+
+A Terraform configuration part can set Terraform variables from existing AWS Secrets Manager secrets with
+`secret_variables`. The configuration holds references only; yago reads the values when Terraform runs.
+
+```yaml
+secret_variables:
+  db_password:                # Terraform variable name
+    secret_id: prod/app/db    # secret name or ARN (required)
+    json_key: password        # optional: take one field of a JSON secret
+  api_token:
+    secret_id: prod/app/api-token
+    version_stage: AWSPREVIOUS  # optional: version_stage or version_id, not both
+```
+
+- `yago tf assemble` removes `secret_variables` from `.gitops/configuration.tfvars.json` and writes the references
+  to `.gitops/terraform-secrets.json`. Secret values are never written to `.gitops`.
+- `plan`, `apply`, `destroy` and `import` read the secrets with `--aws-profile` and `--aws-region`, and pass each one as
+  `TF_VAR_<name>`. Dry runs don't read them. Secret values are removed from the Terraform output that yago logs.
+- A saved plan keeps the references it was made with in `<plan file>.secrets.json`, and applying that plan uses them.
+  If a saved plan has no references file but the configuration has secret inputs, `apply` stops. Plan again with yago.
+- A JSON field that isn't a string is passed as compact JSON, for Terraform variables of list, map or object type.
+- Variable names may use letters, digits and underscores, and can't start with a digit. A variable can't be set both
+  in the configuration and in `secret_variables`.
+
+Terraform stores input variable values in saved plan files, and in state when resources use them. Declare these
+variables `sensitive = true`, or `ephemeral = true` if nothing needs to keep the value.
+
 ## Configuration
 
 ### Logging

@@ -16,6 +16,8 @@
       "repoWatchList": "desiredstate.meta.repo.git.watch",
       "masterPipelineRoot": "desiredstate.meta.pipelines_as_code",
       "pipelinesPartFile": "desiredstate.meta.parts.pipelines",
+      "terraformSourceCodeRepo": "desiredstate.components.terraform.git",
+      "terraformVersion": "desiredstate.tools.terraform",
       "configRepoLocatorPrimary": "desiredstate.content.environments.{environment}.configurations.{wrapper}",
       "configRepoLocatorPrimaryGit": "desiredstate.content.environments.{environment}.configurations.{wrapper}.git",
       "configRepoLocatorLegacy": "desiredstate.configuration.{environment}.{wrapper}",
