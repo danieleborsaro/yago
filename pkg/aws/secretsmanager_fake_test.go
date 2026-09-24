@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
@@ -95,6 +96,19 @@ func (f *fakeAWS) secretByID(id string) *fakeSecret {
 	return nil
 }
 
+// resolveKey accepts what KMS accepts: a key ID, key ARN, alias or alias ARN.
+func (f *fakeAWS) resolveKey(keyId string) string {
+	if i := strings.Index(keyId, ":alias/"); i >= 0 {
+		keyId = keyId[i+1:]
+	} else if i := strings.Index(keyId, ":key/"); i >= 0 {
+		keyId = keyId[i+len(":key/"):]
+	}
+	if aliasKeyId, isAlias := f.aliases[keyId]; isAlias {
+		return aliasKeyId
+	}
+	return keyId
+}
+
 func (f *fakeAWS) record(call string) {
 	f.calls = append(f.calls, call)
 }
@@ -131,6 +145,9 @@ func (f *fakeAWS) CreateSecret(ctx context.Context, params *secretsmanager.Creat
 	}
 	if len(params.Tags) > maxTags {
 		return nil, &types.InvalidParameterException{Message: aws.String("too many tags")}
+	}
+	if keyId := aws.ToString(params.KmsKeyId); keyId != "" && f.keys[f.resolveKey(keyId)] == nil {
+		return nil, &types.InvalidParameterException{Message: aws.String("no such KMS key")}
 	}
 	tags := map[string]string{}
 	for _, tag := range params.Tags {
@@ -251,7 +268,7 @@ func (f *fakeAWS) ListAliases(ctx context.Context, params *kms.ListAliasesInput,
 	output := &kms.ListAliasesOutput{}
 	for _, name := range names {
 		keyId := f.aliases[name]
-		if params.KeyId != nil && aws.ToString(params.KeyId) != keyId {
+		if params.KeyId != nil && f.resolveKey(aws.ToString(params.KeyId)) != keyId {
 			continue
 		}
 		output.Aliases = append(output.Aliases, kmstypes.AliasListEntry{AliasName: aws.String(name), TargetKeyId: aws.String(keyId)})
@@ -297,10 +314,7 @@ func (f *fakeAWS) DeleteAlias(ctx context.Context, params *kms.DeleteAliasInput,
 
 func (f *fakeAWS) DescribeKey(ctx context.Context, params *kms.DescribeKeyInput, optFns ...func(*kms.Options)) (*kms.DescribeKeyOutput, error) {
 	f.record("DescribeKey")
-	keyId := aws.ToString(params.KeyId)
-	if aliasKeyId, isAlias := f.aliases[keyId]; isAlias {
-		keyId = aliasKeyId
-	}
+	keyId := f.resolveKey(aws.ToString(params.KeyId))
 	key, exists := f.keys[keyId]
 	if !exists {
 		return nil, &kmstypes.NotFoundException{Message: aws.String("not found")}
@@ -314,13 +328,13 @@ func (f *fakeAWS) DescribeKey(ctx context.Context, params *kms.DescribeKeyInput,
 
 func (f *fakeAWS) EnableKeyRotation(ctx context.Context, params *kms.EnableKeyRotationInput, optFns ...func(*kms.Options)) (*kms.EnableKeyRotationOutput, error) {
 	f.record("EnableKeyRotation")
-	f.keys[aws.ToString(params.KeyId)].rotation = true
+	f.keys[f.resolveKey(aws.ToString(params.KeyId))].rotation = true
 	return &kms.EnableKeyRotationOutput{}, nil
 }
 
 func (f *fakeAWS) ListResourceTags(ctx context.Context, params *kms.ListResourceTagsInput, optFns ...func(*kms.Options)) (*kms.ListResourceTagsOutput, error) {
 	f.record("ListResourceTags")
-	key, exists := f.keys[aws.ToString(params.KeyId)]
+	key, exists := f.keys[f.resolveKey(aws.ToString(params.KeyId))]
 	if !exists {
 		return nil, &kmstypes.NotFoundException{Message: aws.String("not found")}
 	}
@@ -333,7 +347,7 @@ func (f *fakeAWS) ListResourceTags(ctx context.Context, params *kms.ListResource
 
 func (f *fakeAWS) ScheduleKeyDeletion(ctx context.Context, params *kms.ScheduleKeyDeletionInput, optFns ...func(*kms.Options)) (*kms.ScheduleKeyDeletionOutput, error) {
 	f.record("ScheduleKeyDeletion")
-	key, exists := f.keys[aws.ToString(params.KeyId)]
+	key, exists := f.keys[f.resolveKey(aws.ToString(params.KeyId))]
 	if !exists {
 		return nil, &kmstypes.NotFoundException{Message: aws.String("not found")}
 	}

@@ -65,11 +65,10 @@ func Test_Create_MakesTheSecretAndItsKey(t *testing.T) {
 		t.Errorf("unexpected placeholder: %v", value)
 	}
 
-	keyId := fake.aliases["alias/example/app-database"]
-	if keyId == "" || secret.kmsKeyId != keyId || result.KmsAliasName != "alias/example/app-database" {
+	key := fake.keys[fake.aliases["alias/example/app-database"]]
+	if key == nil || secret.kmsKeyId != key.arn || result.KmsAliasName != "alias/example/app-database" {
 		t.Fatalf("the secret is not encrypted with its own key behind its alias: %+v, aliases %v", result, fake.aliases)
 	}
-	key := fake.keys[keyId]
 	if !key.rotation || key.tags["Foo:Environment:ResourceType"] != ":AWS::KMS::Key" {
 		t.Errorf("unexpected key: %+v", key)
 	}
@@ -159,7 +158,7 @@ func Test_Create_ReusesItsOwnKeyBehindItsAlias(t *testing.T) {
 	if _, _, err := sm.Create(newSecretRequest("example", true)); err != nil {
 		t.Fatal(err)
 	}
-	if fake.called("CreateKey") || fake.secrets["example"].kmsKeyId != "existing-key" {
+	if fake.called("CreateKey") || fake.secrets["example"].kmsKeyId != fake.keys["existing-key"].arn {
 		t.Fatalf("expected the key behind alias/example to be reused: %v", fake.calls)
 	}
 	if !fake.keys["existing-key"].rotation {
@@ -193,7 +192,7 @@ func Test_Create_RefusesAKeyPendingDeletion(t *testing.T) {
 	fake.aliases["alias/example"] = "old-key"
 
 	_, _, err := fake.secretManager(false).Create(newSecretRequest("example", true))
-	if err == nil || !strings.Contains(err.Error(), "pending deletion") {
+	if err == nil || !strings.Contains(err.Error(), "PendingDeletion") {
 		t.Fatalf("expected the key pending deletion to be refused, got %v", err)
 	}
 }

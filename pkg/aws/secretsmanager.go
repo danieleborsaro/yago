@@ -24,6 +24,13 @@ import (
 )
 
 const (
+	EncryptionKms = "kms"
+	// Secrets Manager's default encryption, with the AWS managed key.
+	EncryptionSse = "sse"
+	awsManagedKey = "aws/secretsmanager"
+)
+
+const (
 	PlaceholderValue = "placeholder"
 	b64Suffix        = "_b64"
 
@@ -89,6 +96,8 @@ type CreateRequest struct {
 	PlaceholderKeys      []string
 	PlaintextPlaceholder string
 	IsCreatedHere        bool
+	Encryption           string
+	KmsKeyId             string
 	SecretTags           map[string]string
 	KmsKeyTags           map[string]string
 	Permissions          Permissions
@@ -245,8 +254,11 @@ func (sm *SecretManager) Create(req CreateRequest) (*SecretCreationResult, bool,
 	}
 
 	// Handle isCreatedHere=True: create resources with idempotency
-	if err := ValidateKmsAlias(name); err != nil {
-		return nil, false, err
+	isSse := req.Encryption == EncryptionSse
+	if !isSse && req.KmsKeyId == "" {
+		if err := ValidateKmsAlias(name); err != nil {
+			return nil, false, err
+		}
 	}
 
 	exists, info, err := sm.checkSecretExists(name)
@@ -262,28 +274,51 @@ func (sm *SecretManager) Create(req CreateRequest) (*SecretCreationResult, bool,
 	logging.Info("Secret '%s' does not exist, will create", name)
 
 	aliasName := KmsAliasName(name)
-	existingKey, err := sm.kmsKeyByAlias(aliasName)
-	if err != nil {
-		return nil, false, err
-	}
-	if existingKey != nil {
-		isForSecret, err := sm.isKeyForSecret(aws.ToString(existingKey.KeyId), name)
+	var existingKey *kmstypes.KeyMetadata
+	if isSse {
+		aliasName = awsManagedKey
+	} else if req.KmsKeyId != "" {
+		existingKey, err = sm.findKmsKey(req.KmsKeyId)
 		if err != nil {
 			return nil, false, err
 		}
-		if !isForSecret {
-			return nil, false, errors.Newf(errors.ErrFail,
-				"KMS alias '%s' already exists for a key that was not created for secret '%s'", aliasName, name)
+		if existingKey == nil {
+			return nil, false, errors.Newf(errors.ErrFail, "KMS key '%s' does not exist", req.KmsKeyId)
 		}
-		if existingKey.KeyState == kmstypes.KeyStatePendingDeletion {
-			return nil, false, errors.Newf(errors.ErrFail,
-				"KMS key '%s' behind alias '%s' is pending deletion", aws.ToString(existingKey.KeyId), aliasName)
+		aliasName = ""
+		if strings.Contains(req.KmsKeyId, "alias/") {
+			aliasName = req.KmsKeyId
 		}
+	} else {
+		existingKey, err = sm.findKmsKey(aliasName)
+		if err != nil {
+			return nil, false, err
+		}
+		if existingKey != nil {
+			isForSecret, err := sm.isKeyForSecret(aws.ToString(existingKey.KeyId), name)
+			if err != nil {
+				return nil, false, err
+			}
+			if !isForSecret {
+				return nil, false, errors.Newf(errors.ErrFail,
+					"KMS alias '%s' already exists for a key that was not created for secret '%s'", aliasName, name)
+			}
+		}
+	}
+	if existingKey != nil && existingKey.KeyState != kmstypes.KeyStateEnabled {
+		return nil, false, errors.Newf(errors.ErrFail,
+			"KMS key '%s' can't encrypt secret '%s' as it is %s", aws.ToString(existingKey.KeyId), name, existingKey.KeyState)
 	}
 
 	// Handle dry-run mode
 	if sm.isDryRun {
-		logging.Info("[Dry-Run] Would create secret '%s' with KMS key", name)
+		if isSse {
+			logging.Info("[Dry-Run] Would create secret '%s' with the AWS managed key", name)
+		} else if req.KmsKeyId != "" {
+			logging.Info("[Dry-Run] Would create secret '%s' with KMS key '%s'", name, req.KmsKeyId)
+		} else {
+			logging.Info("[Dry-Run] Would create secret '%s' with KMS key", name)
+		}
 		result := &SecretCreationResult{
 			ARN:          fmt.Sprintf("arn:aws:secretsmanager:%s:%s:secret:%s-XXXXXX", sm.awsRegion, accountId, name),
 			ID:           name,
@@ -293,7 +328,9 @@ func (sm *SecretManager) Create(req CreateRequest) (*SecretCreationResult, bool,
 			KmsAliasName: aliasName,
 			VersionId:    "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX",
 		}
-		if existingKey != nil {
+		if isSse {
+			result.KmsKeyId, result.KmsKeyArn = awsManagedKey, awsManagedKey
+		} else if existingKey != nil {
 			result.KmsKeyId, result.KmsKeyArn = aws.ToString(existingKey.KeyId), aws.ToString(existingKey.Arn)
 		}
 		return result, true, nil
@@ -302,7 +339,17 @@ func (sm *SecretManager) Create(req CreateRequest) (*SecretCreationResult, bool,
 	// Step 1: Create or get KMS key
 	var kmsInfo *KmsKeyResult
 
-	if existingKey != nil {
+	if isSse {
+		logging.Info("Using the AWS managed key for secret '%s'", name)
+		kmsInfo = &KmsKeyResult{KeyId: awsManagedKey, KeyArn: awsManagedKey, AliasName: awsManagedKey}
+	} else if req.KmsKeyId != "" {
+		logging.Info("Using KMS key '%s' for secret '%s'", req.KmsKeyId, name)
+		kmsInfo = &KmsKeyResult{
+			KeyId:     aws.ToString(existingKey.KeyId),
+			KeyArn:    aws.ToString(existingKey.Arn),
+			AliasName: aliasName,
+		}
+	} else if existingKey != nil {
 		logging.Warn("KMS key with alias '%s' already exists, using existing key", aliasName)
 		kmsInfo = &KmsKeyResult{
 			KeyId:     aws.ToString(existingKey.KeyId),
@@ -340,13 +387,16 @@ func (sm *SecretManager) Create(req CreateRequest) (*SecretCreationResult, bool,
 	}
 	secretTags[isCreatedHereTagKey] = isCreatedHereTagValue
 
-	createOutput, err := sm.smClient.CreateSecret(sm.ctx, &secretsmanager.CreateSecretInput{
+	createInput := &secretsmanager.CreateSecretInput{
 		Name:         aws.String(name),
 		Description:  aws.String(description),
-		KmsKeyId:     aws.String(kmsInfo.KeyId),
 		SecretString: aws.String(secretString),
 		Tags:         secretsManagerTags(secretTags),
-	})
+	}
+	if !isSse {
+		createInput.KmsKeyId = aws.String(kmsInfo.KeyArn) // Another account's key needs its ARN.
+	}
+	createOutput, err := sm.smClient.CreateSecret(sm.ctx, createInput)
 	if err != nil {
 		return nil, false, errors.Wrapf(errors.ErrFail, err, "failed to create secret '%s'", name)
 	}
@@ -473,7 +523,7 @@ func (sm *SecretManager) Validate(
 	secretArn := aws.ToString(describeOutput.ARN)
 	kmsKeyId := aws.ToString(describeOutput.KmsKeyId)
 	if kmsKeyId == "" {
-		kmsKeyId = "aws/secretsmanager"
+		kmsKeyId = awsManagedKey
 	}
 
 	// Get KMS key details
@@ -669,17 +719,17 @@ func secretsManagerTags(tags map[string]string) []types.Tag {
 	return smTags
 }
 
-// kmsKeyByAlias returns nil if the alias doesn't exist.
-func (sm *SecretManager) kmsKeyByAlias(aliasName string) (*kmstypes.KeyMetadata, error) {
+// findKmsKey takes a key ID, key ARN, alias or alias ARN, and returns nil if there is no such key.
+func (sm *SecretManager) findKmsKey(keyId string) (*kmstypes.KeyMetadata, error) {
 	describeOutput, err := sm.kmsClient.DescribeKey(sm.ctx, &kms.DescribeKeyInput{
-		KeyId: aws.String(aliasName),
+		KeyId: aws.String(keyId),
 	})
 	if err != nil {
 		var notFound *kmstypes.NotFoundException
 		if stderrors.As(err, &notFound) {
 			return nil, nil
 		}
-		return nil, errors.Wrapf(errors.ErrFail, err, "failed to look up KMS alias '%s'", aliasName)
+		return nil, errors.Wrapf(errors.ErrFail, err, "failed to look up KMS key '%s'", keyId)
 	}
 	return describeOutput.KeyMetadata, nil
 }
@@ -972,7 +1022,7 @@ func (sm *SecretManager) Destroy(secretName string) error {
 	aliasName := KmsAliasName(secretName)
 	isKeyCreatedForSecret := false
 	if info.KmsKeyId != "" && !strings.HasPrefix(info.KmsKeyId, "aws/") {
-		aliasKey, err := sm.kmsKeyByAlias(aliasName)
+		aliasKey, err := sm.findKmsKey(aliasName)
 		if err != nil {
 			return err
 		}
