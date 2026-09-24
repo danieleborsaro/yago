@@ -30,7 +30,7 @@ YAGO uses a flexible JSON schema system that supports plugins, allowing you to c
 1. **Core Schemas** (Embedded)
    - Built into YAGO binary at compile time
    - Always available, no external files needed
-   - Located in `assets/schemas/gitops/` (source code)
+   - Located in `assets/schemas/` (source code)
    - Versions: 1.0.0, 2.0.0
 
 2. **Plugin Schemas** (Runtime)
@@ -1161,7 +1161,7 @@ Look for these log messages:
 
 | Item | Location | Purpose |
 |------|----------|---------|
-| Core GitOps schemas (source) | `assets/schemas/gitops/` | Embedded in binary |
+| Core GitOps schemas (source) | `assets/schemas/` | Embedded in binary |
 | Core GitOps schemas (embedded) | Built into binary | Runtime GitOps schemas |
 | Manifest schemas (source) | `assets/schemas/manifests/` | Embedded manifest validators |
 | Manifest schemas (embedded) | Built into binary | Validates manifest.json structure |

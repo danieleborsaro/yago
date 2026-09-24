@@ -8,7 +8,7 @@
 
 > **Note**: Once coverage badges are configured with a GitHub Gist, the static workflow badge above can be replaced with dynamic coverage percentage badges. See [Coverage Tracking Documentation](docs/COVERAGE_TRACKING.md#coverage-badges) for setup instructions.
 
-A Go implemntation providing tools for handling desired state configuration in the context of a delivery pipeline in the context of a GitOps framework.
+A Go implementation providing tools for handling desired state configuration in the context of a delivery pipeline in the context of a GitOps framework.
 
 ## Features
 
