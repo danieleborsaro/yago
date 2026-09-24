@@ -264,7 +264,7 @@ Quick reference for performance thresholds:
 # .github/workflows/behavioral-bdd-tests.yml
 # Runs on: push to main, develop; pull requests
 # Jobs:
-#   - behavioral-tests (Go 1.21, 1.22, 1.23)
+#   - behavioral-tests (the Go version in go.mod)
 #   - behavioral-contract-validation
 #   - performance-check
 #   - test-quality-gate
