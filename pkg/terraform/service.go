@@ -3,10 +3,13 @@ package terraform
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/danieleborsaro/yago/internal/utils/errors"
 	"github.com/danieleborsaro/yago/internal/utils/logging"
@@ -34,6 +37,8 @@ type Service struct {
 	assembleParser  *Parser
 	codeDir         string
 	secretReader    secretValueReader
+	stdout          io.Writer
+	stderr          io.Writer
 }
 
 // NewService creates a new terraform service instance.
@@ -47,6 +52,8 @@ func NewService(baseDir string, enableInterpolation bool) *Service {
 		workspace:   "default",
 		isDryRun:    isDryRun,
 		codeDir:     baseDir,
+		stdout:      os.Stdout,
+		stderr:      os.Stderr,
 	}
 
 	service.SetAssembleHooks(service)
@@ -1156,16 +1163,35 @@ func (s *Service) runTerraformCommandWithSecrets(workingDir, manifestPath string
 	}
 	cmd.Env = mergeCommandEnvironment(os.Environ(), overrides)
 
-	// Capture output
-	output, err := cmd.CombinedOutput()
-	outputStr := redactSecretOutput(string(output), secrets)
+	redactor := newSecretRedactor(secrets)
+	show := showsTerraformOutput(args)
+	var output []byte
+	if show {
+		// One writer for both streams, so they share a pipe and keep their order
+		shown := &lineWriter{out: s.stdout, redactor: redactor}
+		cmd.Stdout, cmd.Stderr = shown, shown
+		// A broken pipe, like from | head, mustn't kill yago while Terraform is still running
+		brokenPipe := make(chan os.Signal, 1)
+		signal.Notify(brokenPipe, syscall.SIGPIPE)
+		err = cmd.Run()
+		shown.flush()
+		signal.Stop(brokenPipe)
+		output = shown.output.Bytes()
+	} else {
+		output, err = cmd.CombinedOutput()
+	}
+	outputStr := redactor.redact(string(output))
 
 	if err != nil {
 		logging.Error("Terraform command failed: %v", err)
-		logging.Debug("Terraform output:\n%s", outputStr)
+		if !show {
+			_, _ = io.WriteString(s.stderr, outputStr)
+		}
 		return outputStr, errors.Wrapf(errors.ErrFail, err, "terraform command failed")
 	}
 
-	logging.Debug("Terraform output:\n%s", outputStr)
+	if !show {
+		logging.Debug("Terraform output:\n%s", outputStr)
+	}
 	return outputStr, nil
 }

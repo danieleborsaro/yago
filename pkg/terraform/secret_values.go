@@ -117,7 +117,18 @@ func resolveSecretVariables(bindings map[string]SecretVariableBinding, reader se
 	return env, nil
 }
 
-func redactSecretOutput(output string, env map[string]string) string {
+type secretRedactor struct {
+	replacer *strings.Replacer
+}
+
+func (r *secretRedactor) redact(output string) string {
+	if r.replacer == nil {
+		return output
+	}
+	return r.replacer.Replace(output)
+}
+
+func newSecretRedactor(env map[string]string) *secretRedactor {
 	values := make(map[string]struct{})
 	add := func(value string) {
 		if value == "" {
@@ -152,8 +163,9 @@ func redactSecretOutput(output string, env map[string]string) string {
 			collectStrings(decoded)
 		}
 	}
+	redactor := &secretRedactor{}
 	if len(values) == 0 {
-		return output
+		return redactor
 	}
 
 	ordered := make([]string, 0, len(values))
@@ -170,5 +182,6 @@ func redactSecretOutput(output string, env map[string]string) string {
 	for _, value := range ordered {
 		replacements = append(replacements, value, "[REDACTED]")
 	}
-	return strings.NewReplacer(replacements...).Replace(output)
+	redactor.replacer = strings.NewReplacer(replacements...)
+	return redactor
 }

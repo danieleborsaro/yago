@@ -1049,6 +1049,8 @@ func runOutput(flags *commonFlags, outputFile string, isInit, isReset, isGetProv
 
 	// Create service
 	service := newTerraformCommandService(flags, codeDir)
+	// stdout is just for the JSON, so Terraform's own output goes to stderr
+	service.stdout = os.Stderr
 
 	// Check terraform version
 	err = service.CheckDependencies()
@@ -1267,6 +1269,7 @@ func runGraph(flags *commonFlags, graphType string, isInit, isReset, isGetModule
 		// Run terraform graph
 		tfCmd := exec.Command("terraform", graphArgs...)
 		tfCmd.Dir = codeDir
+		tfCmd.Stderr = os.Stderr
 		tfCmd.Env = append(os.Environ(),
 			fmt.Sprintf("AWS_PROFILE=%s", flags.awsProfile),
 			fmt.Sprintf("AWS_REGION=%s", flags.awsRegion),
