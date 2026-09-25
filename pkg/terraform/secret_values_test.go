@@ -159,4 +159,49 @@ func TestSecretRedactor(t *testing.T) {
 	if got := newSecretRedactor(map[string]string{"a": "password", "b": "REDACTED"}).redact("password REDACTED"); got != "[REDACTED] [REDACTED]" {
 		t.Errorf("replacement markers were processed again: %q", got)
 	}
+
+	escaped := newSecretRedactor(map[string]string{"a": `pa"ss&w<o>rd\1`})
+	if got := escaped.redact(`password = "pa\"ss&w<o>rd\\1"`); got != `password = "[REDACTED]"` {
+		t.Errorf("secret as a plan prints it wasn't redacted: %q", got)
+	}
+	if got := escaped.redact(`{"password":"pa\"ss&w<o>rd\\1"}`); got != `{"password":"[REDACTED]"}` {
+		t.Errorf("secret as JSON output prints it wasn't redacted: %q", got)
+	}
+
+	multiline := newSecretRedactor(map[string]string{
+		"a": "-----BEGIN EXAMPLE-----\nZXhhbXBsZQ==\n-----END EXAMPLE-----\n",
+		"b": "pin\n123",
+	})
+	heredoc := "<<-EOT\n    -----BEGIN EXAMPLE-----\n    ZXhhbXBsZQ==\n    -----END EXAMPLE-----\nEOT"
+	if got := multiline.redact(heredoc); got != "<<-EOT\n    [REDACTED]\n    [REDACTED]\n    [REDACTED]\nEOT" {
+		t.Errorf("heredoc lines of a secret weren't redacted: %q", got)
+	}
+	for output, want := range map[string]string{
+		"pin\n123\n":                    "[REDACTED]\n",
+		"pin\n":                         "[REDACTED]\n",
+		"123":                           "[REDACTED]",
+		"    pin\n    123\n":            "    [REDACTED]\n    [REDACTED]\n",
+		"      - pin\n      + 123\r\n":  "      - [REDACTED]\n      + [REDACTED]\r\n",
+		"spinning 1234\nid = \"pin\"\n": "spinning 1234\nid = \"pin\"\n",
+	} {
+		if got := multiline.redact(output); got != want {
+			t.Errorf("redact(%q) = %q, want %q", output, got, want)
+		}
+	}
+	// Output lines that are just a short secret line, like a lone brace, get redacted too
+	braces := newSecretRedactor(map[string]string{"a": "{\n  \"id\": 5\n}"})
+	if got := braces.redact("tags = {}\n  }\n"); got != "tags = {}\n  [REDACTED]\n" {
+		t.Errorf("short secret lines not redacted as whole lines only: %q", got)
+	}
+
+	marked := newSecretRedactor(map[string]string{"a": "+ a\n- b"})
+	for output, want := range map[string]string{
+		"password = <<-EOT\n      + a\n      - b\nEOT\n": "password = <<-EOT\n      [REDACTED]\n      [REDACTED]\nEOT\n",
+		"      + + a\n      - - b\n":                     "      + [REDACTED]\n      - [REDACTED]\n",
+		"+ create\n":                                     "+ create\n",
+	} {
+		if got := marked.redact(output); got != want {
+			t.Errorf("redact(%q) = %q, want %q", output, got, want)
+		}
+	}
 }
