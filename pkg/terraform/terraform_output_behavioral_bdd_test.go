@@ -462,3 +462,39 @@ desiredstate:
 		}
 	}
 }
+
+func TestTerraform_RefusesASavedPlanWithoutSecretVersions_BehavioralBDD(t *testing.T) {
+	contract := BehavioralContract{
+		Behavior:        "Refuse to apply a saved plan whose secret inputs aren't pinned to versions",
+		CurrentImpl:     "Apply checks that every reference in <plan>.secrets.json has a version_id before reading secrets",
+		ExpectedOutcome: "Apply stops and asks for a new plan, without reading secrets or running Terraform",
+		Rationale:       "Older yago saved references without versions, which read a rotated secret, not the value the plan holds",
+	}
+	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
+
+	// Given: a plan saved by an older yago
+	dir := givenFakeTerraform(t, `#!/bin/sh
+echo "Terraform ran"
+`)
+	svc := givenSecretInputs(t, dir, map[string]string{"auth": "example-value"})
+	reader := svc.secretReader.(*fakeSecretValueReader)
+	stdout, _ := showingOutput(svc)
+	older, err := readSecretManifest(defaultSecretManifest(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeSecretManifest(filepath.Join(dir, "tfplan"+planSecretSuffix), older); err != nil {
+		t.Fatal(err)
+	}
+
+	// When: yago applies it
+	_, err = svc.Apply(ApplyRequest{WorkingDir: dir, PlanFile: "tfplan"})
+
+	// Then: it stops and asks for a new plan
+	if err == nil || !strings.Contains(err.Error(), "generate the plan again") {
+		t.Fatalf("apply error = %v, want a request to plan again", err)
+	}
+	if len(reader.calls) != 0 || stdout.String() != "" {
+		t.Errorf("apply read %d secrets and showed %q", len(reader.calls), stdout.String())
+	}
+}
