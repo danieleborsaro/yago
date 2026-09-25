@@ -17,7 +17,7 @@ type SecretVariableBinding struct {
 }
 
 type secretValueReader interface {
-	Read(name, version, stage string) (string, error)
+	Read(name, version, stage string) (value, versionID string, err error)
 }
 
 func secretBindingNames(bindings map[string]SecretVariableBinding) []string {
@@ -59,62 +59,71 @@ func validateSecretBindings(bindings map[string]SecretVariableBinding) error {
 	return nil
 }
 
-func resolveSecretVariables(bindings map[string]SecretVariableBinding, reader secretValueReader) (map[string]string, error) {
+func resolveSecretVariables(bindings map[string]SecretVariableBinding, reader secretValueReader) (map[string]string, map[string]SecretVariableBinding, error) {
 	if err := validateSecretBindings(bindings); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	env := make(map[string]string, len(bindings))
+	pinned := make(map[string]SecretVariableBinding, len(bindings))
 	if len(bindings) == 0 {
-		return env, nil
+		return env, pinned, nil
 	}
 	if reader == nil {
-		return nil, fmt.Errorf("secret value reader is not configured")
+		return nil, nil, fmt.Errorf("secret value reader is not configured")
 	}
 
 	type secretVersion struct {
 		id, version, stage string
 	}
-	cache := make(map[secretVersion]string)
+	type secretRead struct {
+		value, versionID string
+	}
+	cache := make(map[secretVersion]secretRead)
 	for _, name := range secretBindingNames(bindings) {
 		binding := bindings[name]
 		key := secretVersion{binding.SecretID, binding.VersionID, binding.VersionStage}
-		value, cached := cache[key]
+		read, cached := cache[key]
 		if !cached {
-			var err error
-			value, err = reader.Read(binding.SecretID, binding.VersionID, binding.VersionStage)
+			value, versionID, err := reader.Read(binding.SecretID, binding.VersionID, binding.VersionStage)
 			if err != nil {
 				// Secrets Manager errors never contain secret values. The JSON errors below can, so they aren't wrapped.
-				return nil, fmt.Errorf("failed to read secret for Terraform variable %q: %w", name, err)
+				return nil, nil, fmt.Errorf("failed to read secret for Terraform variable %q: %w", name, err)
 			}
-			cache[key] = value
+			read = secretRead{value, versionID}
+			cache[key] = read
 		}
+		if read.versionID != "" {
+			binding.VersionID, binding.VersionStage = read.versionID, ""
+		}
+		pinned[name] = binding
+		value := read.value
 		if binding.JSONKey != "" {
 			var fields map[string]json.RawMessage
 			if err := json.Unmarshal([]byte(value), &fields); err != nil || fields == nil {
-				return nil, fmt.Errorf("secret for Terraform variable %q must be a JSON object", name)
+				return nil, nil, fmt.Errorf("secret for Terraform variable %q must be a JSON object", name)
 			}
 			field, found := fields[binding.JSONKey]
 			if !found || bytes.Equal(bytes.TrimSpace(field), []byte("null")) {
-				return nil, fmt.Errorf("secret for Terraform variable %q has a missing or null JSON field", name)
+				return nil, nil, fmt.Errorf("secret for Terraform variable %q has a missing or null JSON field", name)
 			}
 			if len(field) > 0 && field[0] == '"' {
 				if err := json.Unmarshal(field, &value); err != nil {
-					return nil, fmt.Errorf("secret for Terraform variable %q has an invalid JSON string field", name)
+					return nil, nil, fmt.Errorf("secret for Terraform variable %q has an invalid JSON string field", name)
 				}
 			} else {
 				var compact bytes.Buffer
 				if err := json.Compact(&compact, field); err != nil {
-					return nil, fmt.Errorf("secret for Terraform variable %q has an invalid JSON field", name)
+					return nil, nil, fmt.Errorf("secret for Terraform variable %q has an invalid JSON field", name)
 				}
 				value = compact.String()
 			}
 		}
 		if strings.ContainsRune(value, '\x00') {
-			return nil, fmt.Errorf("secret for Terraform variable %q contains a NUL byte that cannot be passed through the environment", name)
+			return nil, nil, fmt.Errorf("secret for Terraform variable %q contains a NUL byte that cannot be passed through the environment", name)
 		}
 		env["TF_VAR_"+name] = value
 	}
-	return env, nil
+	return env, pinned, nil
 }
 
 // Shorter lines of a multiline secret only get redacted when they're a whole line of output

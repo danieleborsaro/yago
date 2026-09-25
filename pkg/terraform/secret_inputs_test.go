@@ -90,7 +90,7 @@ func TestTerraformSecretEnvironmentAndSavedPlanReferences(t *testing.T) {
 	if err := writeSecretManifest(defaultSecretManifest(dir), manifest); err != nil {
 		t.Fatal(err)
 	}
-	reader := &fakeSecretValueReader{values: map[secretReadCall]string{{name: "original"}: `{"token":"runtime-only-token"}`}}
+	reader := &fakeSecretValueReader{values: map[secretReadCall]string{{name: "original"}: `{"token":"runtime-only-token"}`, {name: "original", version: "v1"}: `{"token":"runtime-only-token"}`}, versions: map[secretReadCall]string{{name: "original"}: "v1", {name: "original", version: "v1"}: "v1"}}
 	svc := NewService(dir, false)
 	svc.SetAWSProfile("review-profile")
 	svc.SetAWSRegion("eu-west-1")
@@ -121,8 +121,8 @@ func TestTerraformSecretEnvironmentAndSavedPlanReferences(t *testing.T) {
 	if _, err := svc.Apply(ApplyRequest{WorkingDir: dir, PlanFile: "saved-plan"}); err != nil {
 		t.Fatal(err)
 	}
-	if len(reader.calls) != 2 || reader.calls[1].name != "original" {
-		t.Fatalf("apply did not resolve the plan's original secret references: %+v", reader.calls)
+	if len(reader.calls) != 2 || reader.calls[1] != (secretReadCall{name: "original", version: "v1"}) {
+		t.Fatalf("apply did not read the plan's pinned secret version: %+v", reader.calls)
 	}
 	if _, err := svc.Apply(ApplyRequest{WorkingDir: dir, PlanFile: "legacy-plan"}); err == nil {
 		t.Fatal("apply should reject a plan missing its secret references")
