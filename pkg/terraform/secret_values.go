@@ -117,28 +117,86 @@ func resolveSecretVariables(bindings map[string]SecretVariableBinding, reader se
 	return env, nil
 }
 
+// Shorter lines of a multiline secret only get redacted when they're a whole line of output
+const minRedactedLineLength = 4
+
 type secretRedactor struct {
 	replacer *strings.Replacer
+	lines    map[string]struct{}
 }
 
 func (r *secretRedactor) redact(output string) string {
 	if r.replacer == nil {
 		return output
 	}
-	return r.replacer.Replace(output)
+	output = r.replacer.Replace(output)
+	var rebuilt strings.Builder
+	changed := false
+	copied, offset := 0, 0
+	for line := range strings.SplitAfterSeq(output, "\n") {
+		if redacted := r.redactWholeLine(line); redacted != line {
+			if !changed {
+				rebuilt.Grow(len(output))
+				changed = true
+			}
+			rebuilt.WriteString(output[copied:offset])
+			rebuilt.WriteString(redacted)
+			copied = offset + len(line)
+		}
+		offset += len(line)
+	}
+	if !changed {
+		return output
+	}
+	rebuilt.WriteString(output[copied:])
+	return rebuilt.String()
+}
+
+func (r *secretRedactor) redactWholeLine(line string) string {
+	body := strings.TrimRight(line, " \t\r\n")
+	start := len(body) - len(strings.TrimLeft(body, " \t"))
+	// A secret's own line can start with what looks like a diff marker, so try the whole line first
+	if _, found := r.lines[body[start:]]; found {
+		return line[:start] + "[REDACTED]" + line[len(body):]
+	}
+	if content := body[start:]; len(content) > 2 && strings.ContainsRune("+-~", rune(content[0])) && (content[1] == ' ' || content[1] == '\t') {
+		start += 1 + len(content[1:]) - len(strings.TrimLeft(content[1:], " \t"))
+		if _, found := r.lines[body[start:]]; found {
+			return line[:start] + "[REDACTED]" + line[len(body):]
+		}
+	}
+	return line
 }
 
 func newSecretRedactor(env map[string]string) *secretRedactor {
 	values := make(map[string]struct{})
-	add := func(value string) {
+	lines := make(map[string]struct{})
+	var add func(string)
+	add = func(value string) {
 		if value == "" {
 			return
 		}
 		values[value] = struct{}{}
-		// Terraform may render strings with JSON escapes rather than literal bytes.
-		encoded, err := json.Marshal(value)
-		if err == nil && len(encoded) > 2 {
-			values[string(encoded[1:len(encoded)-1])] = struct{}{}
+		// Terraform can print strings JSON escaped, with or without &, < and > escaped too
+		for _, escapeHTML := range []bool{true, false} {
+			var encoded bytes.Buffer
+			encoder := json.NewEncoder(&encoded)
+			encoder.SetEscapeHTML(escapeHTML)
+			if encoder.Encode(value) == nil {
+				if quoted := strings.TrimSuffix(encoded.String(), "\n"); len(quoted) > 2 {
+					values[quoted[1:len(quoted)-1]] = struct{}{}
+				}
+			}
+		}
+		// Terraform prints multiline strings one indented line at a time
+		if strings.Contains(value, "\n") {
+			for _, line := range strings.Split(value, "\n") {
+				if line = strings.TrimSpace(line); len(line) >= minRedactedLineLength {
+					add(line)
+				} else if line != "" {
+					lines[line] = struct{}{}
+				}
+			}
 		}
 	}
 	var collectStrings func(interface{})
@@ -163,7 +221,7 @@ func newSecretRedactor(env map[string]string) *secretRedactor {
 			collectStrings(decoded)
 		}
 	}
-	redactor := &secretRedactor{}
+	redactor := &secretRedactor{lines: lines}
 	if len(values) == 0 {
 		return redactor
 	}

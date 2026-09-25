@@ -187,6 +187,53 @@ printf '%s\n' "$(printf '%s' "$TF_VAR_auth" | cut -c8-)"
 	}
 }
 
+func TestTerraform_RedactsSecretsAsTerraformPrintsThem_BehavioralBDD(t *testing.T) {
+	contract := BehavioralContract{
+		Behavior:        "Redact secrets in the forms Terraform prints them in",
+		CurrentImpl:     "newSecretRedactor adds JSON-escaped forms without HTML escaping, and each line of a multi-line secret",
+		ExpectedOutcome: "An escaped string, an indented heredoc and a multi-line secret with short lines are all redacted",
+		Rationale:       "Terraform escapes quotes and backslashes but not &, < and >, and prints multi-line strings as indented heredocs",
+	}
+	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
+
+	// Given: secrets printed as Terraform prints them
+	dir := givenFakeTerraform(t, `#!/bin/sh
+printf '  ~ password = "%s"\n' "$(printf '%s' "$TF_VAR_password" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+echo '  ~ certificate = <<-EOT'
+printf '%s\n' "$TF_VAR_certificate" | sed 's/^/        /'
+echo '    EOT'
+echo '  ~ pin = <<-EOT'
+printf '%s\n' "$TF_VAR_pin" | sed 's/^/      - /'
+echo '    EOT'
+printf '%s\n' "$TF_VAR_pin"
+echo 'marked = <<-EOT'
+printf '%s\n' "$TF_VAR_marked" | sed 's/^/      /'
+echo 'EOT'
+`)
+	svc := givenSecretInputs(t, dir, map[string]string{
+		"password":    `pa"ss&w<o>rd\1`,
+		"certificate": "-----BEGIN EXAMPLE-----\nZXhhbXBsZSBjZXJ0aWZpY2F0ZQ==\n-----END EXAMPLE-----",
+		"pin":         "pin\n123",
+		"marked":      "+ a\n- b",
+	})
+	stdout, _ := showingOutput(svc)
+
+	// When: yago plans
+	if _, err := svc.Plan(PlanRequest{WorkingDir: dir}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Then: no secret is shown
+	want := "  ~ password = \"[REDACTED]\"\n" +
+		"  ~ certificate = <<-EOT\n        [REDACTED]\n        [REDACTED]\n        [REDACTED]\n    EOT\n" +
+		"  ~ pin = <<-EOT\n      - [REDACTED]\n      - [REDACTED]\n    EOT\n" +
+		"[REDACTED]\n[REDACTED]\n" +
+		"marked = <<-EOT\n      [REDACTED]\n      [REDACTED]\nEOT\n"
+	if got := stdout.String(); got != want {
+		t.Errorf("stdout = %q, want %q", got, want)
+	}
+}
+
 func TestTerraform_KeepsOutputYagoReadsOffTheConsole_BehavioralBDD(t *testing.T) {
 	contract := BehavioralContract{
 		Behavior:        "Don't show the output of terraform output and terraform graph, unless they fail",
