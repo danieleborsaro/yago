@@ -469,6 +469,15 @@ func (s *Service) Apply(req ApplyRequest) (*ApplyResponse, error) {
 	if req.PlanFile != "" {
 		planManifest := terraformPlanPath(req.WorkingDir, req.PlanFile) + planSecretSuffix
 		if _, err := os.Stat(planManifest); err == nil {
+			manifest, err := readSecretManifest(planManifest)
+			if err != nil {
+				return nil, err
+			}
+			for _, name := range secretBindingNames(manifest.Variables) {
+				if manifest.Variables[name].VersionID == "" {
+					return nil, fmt.Errorf("saved plan's secret input %q isn't pinned to a version; generate the plan again with yago", name)
+				}
+			}
 			manifestPath = planManifest
 		} else if !os.IsNotExist(err) {
 			return nil, err
