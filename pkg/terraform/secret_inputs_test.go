@@ -1,6 +1,7 @@
 package terraform
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -94,12 +95,17 @@ func TestTerraformSecretEnvironmentAndSavedPlanReferences(t *testing.T) {
 	svc.SetAWSProfile("review-profile")
 	svc.SetAWSRegion("eu-west-1")
 	svc.secretReader = reader
+	var shown bytes.Buffer
+	svc.stdout, svc.stderr = &shown, &shown
 	resp, err := svc.Plan(PlanRequest{WorkingDir: dir, OutFile: "saved-plan"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(resp.Output, "runtime-only-token") || !strings.Contains(resp.Output, "[REDACTED]") {
 		t.Fatalf("Terraform output was not redacted: %s", resp.Output)
+	}
+	if strings.Contains(shown.String(), "runtime-only-token") || !strings.Contains(shown.String(), "[REDACTED]") {
+		t.Fatalf("shown Terraform output was not redacted: %s", shown.String())
 	}
 	if os.Getenv("TF_VAR_auth") != "parent-value" {
 		t.Fatal("secret resolution changed parent process environment")

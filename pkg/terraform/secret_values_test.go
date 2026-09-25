@@ -140,7 +140,7 @@ func TestResolveSecretVariablesFailsClosed(t *testing.T) {
 	}
 }
 
-func TestRedactSecretOutput(t *testing.T) {
+func TestSecretRedactor(t *testing.T) {
 	env := map[string]string{
 		"TF_VAR_password": "overlapping-secret",
 		"TF_VAR_prefix":   "overlapping",
@@ -149,14 +149,14 @@ func TestRedactSecretOutput(t *testing.T) {
 	}
 	output := "overlapping-secret overlapping nested-password array-password line1\nline2 line1\\nline2 " + env["TF_VAR_object"]
 	want := "[REDACTED] [REDACTED] [REDACTED] [REDACTED] [REDACTED] [REDACTED] [REDACTED]"
-	if got := redactSecretOutput(output, env); got != want {
+	if got := newSecretRedactor(env).redact(output); got != want {
 		t.Errorf("unexpected redacted output: %q", got)
 	}
-	if got := redactSecretOutput("ordinary output", nil); got != "ordinary output" {
+	if got := newSecretRedactor(nil).redact("ordinary output"); got != "ordinary output" {
 		t.Errorf("empty secrets changed output: %q", got)
 	}
 	// Replacements are performed once, so a secret matching the marker cannot corrupt it.
-	if got := redactSecretOutput("password REDACTED", map[string]string{"a": "password", "b": "REDACTED"}); got != "[REDACTED] [REDACTED]" {
+	if got := newSecretRedactor(map[string]string{"a": "password", "b": "REDACTED"}).redact("password REDACTED"); got != "[REDACTED] [REDACTED]" {
 		t.Errorf("replacement markers were processed again: %q", got)
 	}
 }
