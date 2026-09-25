@@ -107,10 +107,10 @@ func terraformPlanPath(workingDir, planFile string) string {
 	return filepath.Join(workingDir, planFile)
 }
 
-func (s *Service) secretEnvironment(manifestPath string) (map[string]string, error) {
+func (s *Service) secretEnvironment(manifestPath string) (map[string]string, map[string]SecretVariableBinding, error) {
 	manifest, err := readSecretManifest(manifestPath)
 	if err != nil || len(manifest.Variables) == 0 {
-		return nil, err
+		return nil, nil, err
 	}
 	profile, region := s.awsProfile, s.awsRegion
 	if profile == "" {
@@ -123,7 +123,7 @@ func (s *Service) secretEnvironment(manifestPath string) (map[string]string, err
 	if reader == nil {
 		manager, err := awsmanager.NewSecretManager(profile, region, false)
 		if err != nil {
-			return nil, fmt.Errorf("cannot initialize AWS Secrets Manager for Terraform inputs: %w", err)
+			return nil, nil, fmt.Errorf("cannot initialize AWS Secrets Manager for Terraform inputs: %w", err)
 		}
 		reader = manager
 		defer func() { _ = manager.Close() }()

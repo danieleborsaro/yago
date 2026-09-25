@@ -234,6 +234,52 @@ echo 'EOT'
 	}
 }
 
+func TestTerraform_AppliesASavedPlanWithTheSecretVersionsItWasMadeWith_BehavioralBDD(t *testing.T) {
+	contract := BehavioralContract{
+		Behavior:        "Apply a saved plan with the secret versions the plan was made with",
+		CurrentImpl:     "Plan pins each secret input to the version it read in <plan>.secrets.json, and Apply reads those versions",
+		ExpectedOutcome: "After the secret rotates, applying the plan still reads, and so redacts, the value the plan holds",
+		Rationale:       "A saved plan keeps the values it was made with, and Terraform can print them while applying",
+	}
+	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
+
+	// Given: Terraform that prints the planned value when applying
+	dir := givenFakeTerraform(t, `#!/bin/sh
+case "$1" in
+  plan)
+    for arg in "$@"; do
+      case "$arg" in -out=*) printf '%s' "$TF_VAR_token" > "${arg#-out=}" ;; esac
+    done
+    ;;
+  apply) printf 'token = "%s"\n' "$(cat "$2")" ;;
+esac
+`)
+	// Given: a saved plan
+	svc := givenSecretInputs(t, dir, map[string]string{"token": "example-planned-value"})
+	reader := svc.secretReader.(*fakeSecretValueReader)
+	reader.versions = map[secretReadCall]string{{name: "example/token"}: "planned-version"}
+	reader.values[secretReadCall{name: "example/token", version: "planned-version"}] = "example-planned-value"
+	stdout, _ := showingOutput(svc)
+	if _, err := svc.Plan(PlanRequest{WorkingDir: dir, OutFile: "tfplan"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// When: the secret rotates, then the plan is applied
+	reader.values[secretReadCall{name: "example/token"}] = "example-rotated-value"
+	reader.versions[secretReadCall{name: "example/token"}] = "rotated-version"
+	if _, err := svc.Apply(ApplyRequest{WorkingDir: dir, PlanFile: "tfplan"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Then: the planned version is read, and redacted
+	if last := reader.calls[len(reader.calls)-1]; last != (secretReadCall{name: "example/token", version: "planned-version"}) {
+		t.Errorf("apply read %+v, want the planned version", last)
+	}
+	if got := stdout.String(); got != "token = \"[REDACTED]\"\n" {
+		t.Errorf("stdout = %q", got)
+	}
+}
+
 func TestTerraform_KeepsOutputYagoReadsOffTheConsole_BehavioralBDD(t *testing.T) {
 	contract := BehavioralContract{
 		Behavior:        "Don't show the output of terraform output and terraform graph, unless they fail",
