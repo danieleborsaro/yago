@@ -198,12 +198,14 @@ func TestTerraform_RedactsSecretsAsTerraformPrintsThem_BehavioralBDD(t *testing.
 
 	// Given: secrets printed as Terraform prints them
 	dir := givenFakeTerraform(t, `#!/bin/sh
+esc=$(printf '\033')
 printf '  ~ password = "%s"\n' "$(printf '%s' "$TF_VAR_password" | sed 's/\\/\\\\/g; s/"/\\"/g')"
 echo '  ~ certificate = <<-EOT'
 printf '%s\n' "$TF_VAR_certificate" | sed 's/^/        /'
 echo '    EOT'
 echo '  ~ pin = <<-EOT'
 printf '%s\n' "$TF_VAR_pin" | sed 's/^/      - /'
+printf '%s\n' "$TF_VAR_pin" | sed "s/^/      ${esc}[32m+${esc}[0m${esc}[0m /"
 echo '    EOT'
 printf '%s\n' "$TF_VAR_pin"
 echo 'marked = <<-EOT'
@@ -226,7 +228,7 @@ echo 'EOT'
 	// Then: no secret is shown
 	want := "  ~ password = \"[REDACTED]\"\n" +
 		"  ~ certificate = <<-EOT\n        [REDACTED]\n        [REDACTED]\n        [REDACTED]\n    EOT\n" +
-		"  ~ pin = <<-EOT\n      - [REDACTED]\n      - [REDACTED]\n    EOT\n" +
+		"  ~ pin = <<-EOT\n      - [REDACTED]\n      - [REDACTED]\n      + [REDACTED]\n      + [REDACTED]\n    EOT\n" +
 		"[REDACTED]\n[REDACTED]\n" +
 		"marked = <<-EOT\n      [REDACTED]\n      [REDACTED]\nEOT\n"
 	if got := stdout.String(); got != want {

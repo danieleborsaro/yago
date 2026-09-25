@@ -208,10 +208,22 @@ func TestSecretRedactor(t *testing.T) {
 		t.Errorf("short secret lines not redacted as whole lines only: %q", got)
 	}
 
+	for output, want := range map[string]string{
+		"          \x1b[32m+\x1b[0m\x1b[0m pin\n":     "          + [REDACTED]\n",
+		"\x1b[31m-\x1b[0m 123":                        "- [REDACTED]",
+		"cert = \"-----BEGIN\x1b[0m EXAMPLE-----\"\n": "cert = \"[REDACTED]\"\n",
+		"\x1b[32m+\x1b[0m create\n":                   "\x1b[32m+\x1b[0m create\n",
+	} {
+		if got := multiline.redact(output); got != want {
+			t.Errorf("redact(%q) = %q, want %q", output, got, want)
+		}
+	}
+
 	marked := newSecretRedactor(map[string]string{"a": "+ a\n- b"})
 	for output, want := range map[string]string{
 		"password = <<-EOT\n      + a\n      - b\nEOT\n": "password = <<-EOT\n      [REDACTED]\n      [REDACTED]\nEOT\n",
 		"      + + a\n      - - b\n":                     "      + [REDACTED]\n      - [REDACTED]\n",
+		"      \x1b[32m+\x1b[0m\x1b[0m + a\n":            "      + [REDACTED]\n",
 		"+ create\n":                                     "+ create\n",
 	} {
 		if got := marked.redact(output); got != want {

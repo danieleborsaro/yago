@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -129,6 +130,8 @@ func resolveSecretVariables(bindings map[string]SecretVariableBinding, reader se
 // Shorter lines of a multiline secret only get redacted when they're a whole line of output
 const minRedactedLineLength = 4
 
+var ansiEscape = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
+
 type secretRedactor struct {
 	replacer *strings.Replacer
 	lines    map[string]struct{}
@@ -143,7 +146,7 @@ func (r *secretRedactor) redact(output string) string {
 	changed := false
 	copied, offset := 0, 0
 	for line := range strings.SplitAfterSeq(output, "\n") {
-		if redacted := r.redactWholeLine(line); redacted != line {
+		if redacted := r.redactLine(line); redacted != line {
 			if !changed {
 				rebuilt.Grow(len(output))
 				changed = true
@@ -159,6 +162,21 @@ func (r *secretRedactor) redact(output string) string {
 	}
 	rebuilt.WriteString(output[copied:])
 	return rebuilt.String()
+}
+
+// If a secret only shows up once the colour codes are gone, the line is shown without colours
+func (r *secretRedactor) redactLine(line string) string {
+	if strings.IndexByte(line, '\x1b') < 0 {
+		return r.redactWholeLine(line)
+	}
+	plain := ansiEscape.ReplaceAllString(line, "")
+	if plain == line {
+		return r.redactWholeLine(line)
+	}
+	if redacted := r.redactWholeLine(r.replacer.Replace(plain)); redacted != plain {
+		return redacted
+	}
+	return line
 }
 
 func (r *secretRedactor) redactWholeLine(line string) string {
