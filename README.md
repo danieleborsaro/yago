@@ -252,9 +252,12 @@ secret_variables:
 - `yago tf assemble` removes `secret_variables` from `.gitops/configuration.tfvars.json` and writes the references
   to `.gitops/terraform-secrets.json`. Secret values are never written to `.gitops`.
 - `plan`, `apply`, `destroy` and `import` read the secrets with `--aws-profile` and `--aws-region`, and pass each one as
-  `TF_VAR_<name>`. Dry runs don't read them. Secret values are removed from the Terraform output that yago logs.
-- A saved plan keeps the references it was made with in `<plan file>.secrets.json`, and applying that plan uses them.
-  If a saved plan has no references file but the configuration has secret inputs, `apply` stops. Plan again with yago.
+  `TF_VAR_<name>`. Dry runs don't read them. Secret values are removed from the Terraform output yago shows, as are
+  the lines of a multi-line secret. Lines shorter than 4 characters are only removed where they make up a whole line.
+- A saved plan keeps the exact secret versions it was made with in `<plan file>.secrets.json`, as references, and
+  applying that plan reads those versions even if the secret has changed since. If a saved plan has no references
+  file but the configuration has secret inputs, or its references aren't pinned to versions, as in plans saved by
+  older versions of yago, `apply` stops. Plan again with yago.
 - A JSON field that isn't a string is passed as compact JSON, for Terraform variables of list, map or object type.
 - Variable names may use letters, digits and underscores, and can't start with a digit. A variable can't be set both
   in the configuration and in `secret_variables`.

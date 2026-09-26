@@ -624,7 +624,7 @@ func (sm *SecretManager) Validate(
 }
 
 // Read reads a secret value from Secrets Manager.
-func (sm *SecretManager) Read(name, version, stage string) (string, error) {
+func (sm *SecretManager) Read(name, version, stage string) (string, string, error) {
 	logging.Debug("Reading secret: %s (version: %s, stage: %s)", name, version, stage)
 
 	var getOutput *secretsmanager.GetSecretValueOutput
@@ -649,18 +649,19 @@ func (sm *SecretManager) Read(name, version, stage string) (string, error) {
 	}
 
 	if err != nil {
-		return "", errors.Wrapf(errors.ErrFail, err, "failed to read secret '%s'", name)
+		return "", "", errors.Wrapf(errors.ErrFail, err, "failed to read secret '%s'", name)
 	}
 
+	versionID := aws.ToString(getOutput.VersionId)
 	if getOutput.SecretString != nil {
-		return aws.ToString(getOutput.SecretString), nil
+		return aws.ToString(getOutput.SecretString), versionID, nil
 	}
 
 	if getOutput.SecretBinary != nil {
-		return string(getOutput.SecretBinary), nil
+		return string(getOutput.SecretBinary), versionID, nil
 	}
 
-	return "", errors.New(errors.ErrFail, fmt.Sprintf("secret '%s' has no value", name))
+	return "", "", errors.New(errors.ErrFail, fmt.Sprintf("secret '%s' has no value", name))
 }
 
 // Helper Methods

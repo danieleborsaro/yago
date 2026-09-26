@@ -3,10 +3,13 @@ package terraform
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/danieleborsaro/yago/internal/utils/errors"
 	"github.com/danieleborsaro/yago/internal/utils/logging"
@@ -34,6 +37,8 @@ type Service struct {
 	assembleParser  *Parser
 	codeDir         string
 	secretReader    secretValueReader
+	stdout          io.Writer
+	stderr          io.Writer
 }
 
 // NewService creates a new terraform service instance.
@@ -47,6 +52,8 @@ func NewService(baseDir string, enableInterpolation bool) *Service {
 		workspace:   "default",
 		isDryRun:    isDryRun,
 		codeDir:     baseDir,
+		stdout:      os.Stdout,
+		stderr:      os.Stderr,
 	}
 
 	service.SetAssembleHooks(service)
@@ -387,7 +394,7 @@ func (s *Service) Plan(req PlanRequest) (*PlanResponse, error) {
 		defer os.Setenv("TF_VAR_gitops_environment", originalEnv)
 	}
 
-	output, err := s.runTerraformCommand(req.WorkingDir, args...)
+	output, pinned, err := s.runTerraformCommandWithSecrets(req.WorkingDir, defaultSecretManifest(req.WorkingDir), args...)
 	if err != nil {
 		return &PlanResponse{
 			Success: false,
@@ -401,6 +408,10 @@ func (s *Service) Plan(req PlanRequest) (*PlanResponse, error) {
 		manifest, err := readSecretManifest(defaultSecretManifest(req.WorkingDir))
 		if err != nil {
 			return nil, err
+		}
+		// A saved plan holds the values it was made with, so it has to be applied with the same secret versions
+		if len(pinned) > 0 {
+			manifest.Variables = pinned
 		}
 		if err := writeSecretManifest(terraformPlanPath(req.WorkingDir, req.OutFile)+planSecretSuffix, manifest); err != nil {
 			return nil, fmt.Errorf("failed to save secret references alongside Terraform plan: %w", err)
@@ -458,6 +469,15 @@ func (s *Service) Apply(req ApplyRequest) (*ApplyResponse, error) {
 	if req.PlanFile != "" {
 		planManifest := terraformPlanPath(req.WorkingDir, req.PlanFile) + planSecretSuffix
 		if _, err := os.Stat(planManifest); err == nil {
+			manifest, err := readSecretManifest(planManifest)
+			if err != nil {
+				return nil, err
+			}
+			for _, name := range secretBindingNames(manifest.Variables) {
+				if manifest.Variables[name].VersionID == "" {
+					return nil, fmt.Errorf("saved plan's secret input %q isn't pinned to a version; generate the plan again with yago", name)
+				}
+			}
 			manifestPath = planManifest
 		} else if !os.IsNotExist(err) {
 			return nil, err
@@ -471,7 +491,7 @@ func (s *Service) Apply(req ApplyRequest) (*ApplyResponse, error) {
 			}
 		}
 	}
-	output, err := s.runTerraformCommandWithSecrets(req.WorkingDir, manifestPath, args...)
+	output, _, err := s.runTerraformCommandWithSecrets(req.WorkingDir, manifestPath, args...)
 	if err != nil {
 		return &ApplyResponse{
 			Success: false,
@@ -1103,14 +1123,15 @@ func (s *Service) Costs(req CostsRequest) (*CostsResponse, error) {
 
 // runTerraformCommand executes a terraform command and returns the output.
 func (s *Service) runTerraformCommand(workingDir string, args ...string) (string, error) {
-	return s.runTerraformCommandWithSecrets(workingDir, defaultSecretManifest(workingDir), args...)
+	output, _, err := s.runTerraformCommandWithSecrets(workingDir, defaultSecretManifest(workingDir), args...)
+	return output, err
 }
 
-func (s *Service) runTerraformCommandWithSecrets(workingDir, manifestPath string, args ...string) (string, error) {
+func (s *Service) runTerraformCommandWithSecrets(workingDir, manifestPath string, args ...string) (string, map[string]SecretVariableBinding, error) {
 	// Check if terraform is available
 	tfPath, err := exec.LookPath("terraform")
 	if err != nil {
-		return "", errors.Newf(errors.ErrFail, "terraform command not found in PATH. Please install Terraform %s", s.tfVersion)
+		return "", nil, errors.Newf(errors.ErrFail, "terraform command not found in PATH. Please install Terraform %s", s.tfVersion)
 	}
 
 	logging.Debug("Using terraform binary: %s", tfPath)
@@ -1129,7 +1150,7 @@ func (s *Service) runTerraformCommandWithSecrets(workingDir, manifestPath string
 		if s.awsRegion != "" {
 			logging.Info("[Dry-Run] AWS_REGION=%s", s.awsRegion)
 		}
-		return "", nil
+		return "", nil, nil
 	}
 
 	// Create command
@@ -1138,10 +1159,11 @@ func (s *Service) runTerraformCommandWithSecrets(workingDir, manifestPath string
 
 	// Resolve references only at execution time, never during assembly or dry runs.
 	var secrets map[string]string
+	var pinned map[string]SecretVariableBinding
 	if needsSecretVariables(args) {
-		secrets, err = s.secretEnvironment(manifestPath)
+		secrets, pinned, err = s.secretEnvironment(manifestPath)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 	}
 	overrides := make(map[string]string, len(secrets)+2)
@@ -1156,16 +1178,35 @@ func (s *Service) runTerraformCommandWithSecrets(workingDir, manifestPath string
 	}
 	cmd.Env = mergeCommandEnvironment(os.Environ(), overrides)
 
-	// Capture output
-	output, err := cmd.CombinedOutput()
-	outputStr := redactSecretOutput(string(output), secrets)
+	redactor := newSecretRedactor(secrets)
+	show := showsTerraformOutput(args)
+	var output []byte
+	if show {
+		// One writer for both streams, so they share a pipe and keep their order
+		shown := &lineWriter{out: s.stdout, redactor: redactor}
+		cmd.Stdout, cmd.Stderr = shown, shown
+		// A broken pipe, like from | head, mustn't kill yago while Terraform is still running
+		brokenPipe := make(chan os.Signal, 1)
+		signal.Notify(brokenPipe, syscall.SIGPIPE)
+		err = cmd.Run()
+		shown.flush()
+		signal.Stop(brokenPipe)
+		output = shown.output.Bytes()
+	} else {
+		output, err = cmd.CombinedOutput()
+	}
+	outputStr := redactor.redact(string(output))
 
 	if err != nil {
 		logging.Error("Terraform command failed: %v", err)
-		logging.Debug("Terraform output:\n%s", outputStr)
-		return outputStr, errors.Wrapf(errors.ErrFail, err, "terraform command failed")
+		if !show {
+			_, _ = io.WriteString(s.stderr, outputStr)
+		}
+		return outputStr, nil, errors.Wrapf(errors.ErrFail, err, "terraform command failed")
 	}
 
-	logging.Debug("Terraform output:\n%s", outputStr)
-	return outputStr, nil
+	if !show {
+		logging.Debug("Terraform output:\n%s", outputStr)
+	}
+	return outputStr, pinned, nil
 }

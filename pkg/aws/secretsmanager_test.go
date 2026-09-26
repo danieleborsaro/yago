@@ -196,13 +196,13 @@ func Test_Read(t *testing.T) {
 		{stage: "AWSCURRENT"},
 		{},
 	} {
-		value, err := sm.Read("example", tc.version, tc.stage)
-		if err != nil || value != "placeholder" {
-			t.Errorf("Read(%q, %q) = %q, %v", tc.version, tc.stage, value, err)
+		value, versionID, err := sm.Read("example", tc.version, tc.stage)
+		if err != nil || value != "placeholder" || versionID != fake.secrets["example"].versionId {
+			t.Errorf("Read(%q, %q) = %q, %q, %v", tc.version, tc.stage, value, versionID, err)
 		}
 	}
 
-	if _, err := sm.Read("missing", "", ""); err == nil {
+	if _, _, err := sm.Read("missing", "", ""); err == nil {
 		t.Error("expected an error for a missing secret")
 	}
 }
