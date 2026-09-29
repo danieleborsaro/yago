@@ -2,6 +2,7 @@ package desiredstate
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -226,6 +227,128 @@ func TestPromote_NewComponentFailsBeforeWriting_BehavioralBDD(t *testing.T) {
 	}
 	if got := f.read(dst); got != before {
 		t.Errorf("destination changed after a failed promotion:\n%s", got)
+	}
+}
+
+func TestPromote_SelectedComponentsOnly_BehavioralBDD(t *testing.T) {
+	contract := PromoteBehavioralContract{
+		Behavior:        "Promote only the components in SelectedPartIDs",
+		CurrentImpl:     "PromoteDesiredState skips source components missing from req.SelectedPartIDs",
+		ExpectedOutcome: "Selected components move, the rest keep their destination version",
+		Rationale:       "Interactive promote relies on this to leave declined components alone",
+	}
+	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
+
+	// Given: two components behind the source, only api selected
+	f := newPromoteFixture(t)
+	src := f.singleFile("src", map[string]string{"api": "2.1.0", "web": "1.5.0"})
+	dst := f.singleFile("dst", map[string]string{"api": "2.0.0", "web": "1.0.0"})
+	req := promoteRequest(src, dst)
+	req.SelectedPartIDs = map[string]bool{"artifacts.api.docker.eu-west-1": true}
+
+	// When: the source is promoted
+	_, err := NewService(".", false).PromoteDesiredState(req)
+
+	// Then: only api moves
+	if err != nil {
+		t.Fatalf("PromoteDesiredState: %v", err)
+	}
+	got := f.read(dst)
+	assertTag(t, got, "api", "2.1.0")
+	assertTag(t, got, "web", "1.0.0")
+}
+
+func TestPromote_DowngradesOnlyBlockWhenSelected_BehavioralBDD(t *testing.T) {
+	contract := PromoteBehavioralContract{
+		Behavior:        "Only a selected downgrade blocks a selective promotion",
+		CurrentImpl:     "selectionIsValid checks downgrades among the selected components only",
+		ExpectedOutcome: "Skipping the downgrade lets the upgrade through, selecting it is refused",
+		Rationale:       "Skipping a downgrade interactively used to still fail the whole promotion",
+	}
+	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
+
+	// Given: api is an upgrade and web a downgrade
+	f := newPromoteFixture(t)
+	src := f.singleFile("src", map[string]string{"api": "2.1.0", "web": "0.9.0"})
+	dst := f.singleFile("dst", map[string]string{"api": "2.0.0", "web": "1.0.0"})
+	service := NewService(".", false)
+
+	// When: everything is promoted
+	_, err := service.PromoteDesiredState(promoteRequest(src, dst))
+
+	// Then: the downgrade blocks it
+	if err == nil {
+		t.Fatal("promotion with a downgrade succeeded, want it refused")
+	}
+
+	// When: only the upgrade is selected
+	req := promoteRequest(src, dst)
+	req.SelectedPartIDs = map[string]bool{"artifacts.api.docker.eu-west-1": true}
+	_, err = service.PromoteDesiredState(req)
+
+	// Then: the upgrade goes through and web stays put
+	if err != nil {
+		t.Fatalf("promoting only the upgrade: %v", err)
+	}
+	got := f.read(dst)
+	assertTag(t, got, "api", "2.1.0")
+	assertTag(t, got, "web", "1.0.0")
+
+	// When: only the downgrade is selected
+	req.SelectedPartIDs = map[string]bool{"artifacts.web.docker.eu-west-1": true}
+	_, err = service.PromoteDesiredState(req)
+
+	// Then: it's refused
+	if err == nil {
+		t.Fatal("promoting a selected downgrade succeeded, want it refused")
+	}
+}
+
+func TestInteractivePromotion_Answers_BehavioralBDD(t *testing.T) {
+	contract := PromoteBehavioralContract{
+		Behavior:        "Interactive promote does exactly what was answered",
+		CurrentImpl:     "runInteractivePromotion reads one fresh line per question and passes the selection on",
+		ExpectedOutcome: "Declined components stay put, Enter means no and input ending early aborts",
+		Rationale:       "Declined components used to be promoted, and Enter at the last question reused an earlier y",
+	}
+	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
+
+	tests := []struct {
+		name    string
+		answers string
+		wantErr string
+		wantAPI string
+		wantWeb string
+	}{
+		{name: "apply all", answers: "y\na\ny\n", wantAPI: "2.1.0", wantWeb: "1.5.0"},
+		{name: "declined component is left alone", answers: "y\ny\ny\nn\ny\n", wantAPI: "2.1.0", wantWeb: "1.0.0"},
+		{name: "enter at final confirmation cancels", answers: "y\ny\ny\ny\n\n", wantAPI: "2.0.0", wantWeb: "1.0.0"},
+		{name: "input ending mid review aborts", answers: "y\ny\ny\n", wantErr: "before input ended", wantAPI: "2.0.0", wantWeb: "1.0.0"},
+		{name: "no input at all aborts", answers: "", wantErr: "before input ended", wantAPI: "2.0.0", wantWeb: "1.0.0"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Given: api and web are both behind the source
+			f := newPromoteFixture(t)
+			src := f.singleFile("src", map[string]string{"api": "2.1.0", "web": "1.5.0"})
+			dst := f.singleFile("dst", map[string]string{"api": "2.0.0", "web": "1.0.0"})
+
+			// When: the promotion runs with these answers
+			err := runInteractivePromotion(NewService(".", false), promoteRequest(src, dst),
+				strings.NewReader(tt.answers), io.Discard)
+
+			// Then: the destination matches the answers
+			if tt.wantErr == "" && err != nil {
+				t.Fatalf("runInteractivePromotion: %v", err)
+			}
+			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Fatalf("error = %v, want one containing %q", err, tt.wantErr)
+			}
+			got := f.read(dst)
+			assertTag(t, got, "api", tt.wantAPI)
+			assertTag(t, got, "web", tt.wantWeb)
+		})
 	}
 }
 

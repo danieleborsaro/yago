@@ -9,7 +9,9 @@
 package desiredstate
 
 import (
+	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strings"
@@ -510,7 +512,7 @@ func runPromote(config *DesiredStateConfig, awsProfile, awsRegion, sourceBranch,
 
 	// If interactive mode, first compare and prompt
 	if isInteractive {
-		return runInteractivePromotion(service, req)
+		return runInteractivePromotion(service, req, os.Stdin, os.Stdout)
 	}
 
 	// Execute promotion through service layer
@@ -546,7 +548,7 @@ func runPromote(config *DesiredStateConfig, awsProfile, awsRegion, sourceBranch,
 }
 
 // runInteractivePromotion runs promotion in interactive mode, prompting for each component
-func runInteractivePromotion(service *Service, req PromoteRequest) error {
+func runInteractivePromotion(service *Service, req PromoteRequest, in io.Reader, out io.Writer) error {
 	logging.Info("Starting interactive promotion...")
 	logging.Info("Source:      %s", req.DesiredStateFile)
 	logging.Info("Destination: %s", req.DestinationFile)
@@ -581,157 +583,180 @@ func runInteractivePromotion(service *Service, req PromoteRequest) error {
 
 	logging.Spaces()
 
-	// Prompt user if they want to proceed
-	fmt.Print("Proceed with promotion? [y/n]: ")
-	var response string
-	fmt.Scanln(&response)
-	if !strings.EqualFold(response, "y") && !strings.EqualFold(response, "yes") {
+	p := newPrompter(in, out)
+	proceed, err := p.confirm("Proceed with promotion? [y/n]: ")
+	if err != nil {
+		return err
+	}
+	if !proceed {
 		logging.Info("Promotion cancelled")
 		return nil
 	}
 
-	// Ask if they want to review each change
-	fmt.Print("Apply changes individually? [y/n/a(ll)]: ")
-	fmt.Scanln(&response)
-
-	applyAll := false
-	if strings.EqualFold(response, "a") || strings.EqualFold(response, "all") {
-		applyAll = true
-		logging.Info("Applying all changes...")
-	} else if !strings.EqualFold(response, "y") && !strings.EqualFold(response, "yes") {
-		// User wants to apply all without review
-		applyAll = true
+	answer, err := p.ask("Apply changes individually? [y/n/a(ll)]: ")
+	if err != nil {
+		return err
 	}
+	reviewEach := answer == "y" || answer == "yes"
 
-	// Track which components to promote
-	componentsToPromote := make(map[string]bool)
-	skipDowngrades := false
-	skipUnchanged := false
-
-	if !applyAll {
-		// Iterate through changes and prompt
-		for _, change := range compareResult.ComponentChanges {
-			// Skip if user said skip all downgrades
-			if skipDowngrades && change.IsDowngrade {
-				logging.Debug("Skipping downgrade: %s", change.PartID)
-				continue
-			}
-
-			// Skip if user said skip all unchanged
-			if skipUnchanged && change.IsUnchanged {
-				logging.Debug("Skipping unchanged: %s", change.PartID)
-				continue
-			}
-
-			// Display change
-			logging.Spaces()
-			if change.IsUpgrade {
-				logging.Info("  ↑ %s: %s -> %s (UPGRADE)", change.PartID, change.SourceVersion, change.DestVersion)
-			} else if change.IsDowngrade {
-				if change.IsRollback {
-					logging.Warn("  ↻ %s: %s -> %s (ROLLBACK: %s)", change.PartID, change.SourceVersion, change.DestVersion, change.RollbackReason)
-				} else {
-					logging.Warn("  ↓ %s: %s -> %s (DOWNGRADE!)", change.PartID, change.SourceVersion, change.DestVersion)
-				}
-			} else {
-				logging.Info("  = %s: %s (unchanged)", change.PartID, change.SourceVersion)
-			}
-
-			// Prompt for action
-			if change.IsDowngrade && !change.IsRollback {
-				fmt.Print("  Apply this downgrade? [y/n/s(kip all downgrades)]: ")
-			} else if change.IsUnchanged {
-				fmt.Print("  Apply unchanged? [y/n/s(kip unchanged)]: ")
-			} else {
-				fmt.Print("  Apply? [y/n/a(ll remaining)]: ")
-			}
-
-			var action string
-			fmt.Scanln(&action)
-
-			switch strings.ToLower(action) {
-			case "y", "yes":
-				componentsToPromote[change.PartID] = true
-				logging.Debug("Will promote: %s", change.PartID)
-			case "a", "all":
-				componentsToPromote[change.PartID] = true
-				applyAll = true
-				logging.Info("Applying all remaining changes...")
-			case "s", "skip":
-				if change.IsDowngrade {
-					skipDowngrades = true
-					logging.Info("Skipping all downgrades...")
-				} else if change.IsUnchanged {
-					skipUnchanged = true
-					logging.Info("Skipping all unchanged components...")
-				}
-			case "n", "no":
-				logging.Debug("Skipping: %s", change.PartID)
-			default:
-				logging.Debug("Skipping: %s (invalid response)", change.PartID)
-			}
-
-			if applyAll {
-				// Mark all remaining changes for promotion
-				componentsToPromote[change.PartID] = true
-				break
-			}
-		}
-
-		// If apply all was selected, mark all remaining
-		if applyAll {
-			for _, change := range compareResult.ComponentChanges {
-				if !skipDowngrades || !change.IsDowngrade {
-					if !skipUnchanged || !change.IsUnchanged {
-						componentsToPromote[change.PartID] = true
-					}
-				}
-			}
+	var selected map[string]bool
+	if reviewEach {
+		selected, err = selectComponents(compareResult.ComponentChanges, p)
+		if err != nil {
+			return err
 		}
 	} else {
-		// Apply all - mark everything for promotion
+		logging.Info("Applying all changes...")
+		selected = make(map[string]bool, len(compareResult.ComponentChanges))
 		for _, change := range compareResult.ComponentChanges {
-			componentsToPromote[change.PartID] = true
+			selected[change.PartID] = true
 		}
 	}
 
 	// Summary
 	logging.Spaces()
 	logging.Info("Promotion Summary:")
-	logging.Info("  Selected for promotion: %d components", len(componentsToPromote))
-	logging.Info("  Skipped:                %d components", len(compareResult.ComponentChanges)-len(componentsToPromote))
+	logging.Info("  Selected for promotion: %d components", len(selected))
+	logging.Info("  Skipped:                %d components", len(compareResult.ComponentChanges)-len(selected))
 
-	if len(componentsToPromote) == 0 {
+	if len(selected) == 0 {
 		logging.Info("No components selected for promotion")
 		return nil
 	}
 
-	// Confirm final action
-	fmt.Print("\nProceed with promotion? [y/n]: ")
-	fmt.Scanln(&response)
-	if !strings.EqualFold(response, "y") && !strings.EqualFold(response, "yes") {
+	proceed, err = p.confirm("\nProceed with promotion? [y/n]: ")
+	if err != nil {
+		return err
+	}
+	if !proceed {
 		logging.Info("Promotion cancelled")
 		return nil
 	}
 
-	// Execute promotion with selected components
-	// For now, we promote all or nothing. In a full implementation,
-	// we would need to extend the service to support selective promotion.
+	if reviewEach {
+		req.SelectedPartIDs = selected
+	}
+
 	logging.Spaces()
 	logging.Info("Executing promotion...")
 
-	response2, err := service.PromoteDesiredState(req)
+	response, err := service.PromoteDesiredState(req)
 	if err != nil {
 		return err
 	}
 
-	if response2.Success {
+	if response.Success {
 		logging.Spaces()
 		logging.Info("✓ Promotion completed successfully!")
 		logging.Info("  Updated file: %s", req.DestinationFile)
 	}
 
 	return nil
+}
+
+func selectComponents(changes []ComponentChange, p *prompter) (map[string]bool, error) {
+	selected := make(map[string]bool)
+	skipDowngrades := false
+	skipUnchanged := false
+	applyRemaining := false
+
+	for _, change := range changes {
+		if skipDowngrades && change.IsDowngrade {
+			logging.Debug("Skipping downgrade: %s", change.PartID)
+			continue
+		}
+		if skipUnchanged && change.IsUnchanged {
+			logging.Debug("Skipping unchanged: %s", change.PartID)
+			continue
+		}
+		if applyRemaining {
+			selected[change.PartID] = true
+			continue
+		}
+
+		logging.Spaces()
+		logChange(change)
+
+		var question string
+		switch {
+		case change.IsDowngrade && !change.IsRollback:
+			question = "  Apply this downgrade? [y/n/s(kip all downgrades)]: "
+		case change.IsUnchanged:
+			question = "  Apply unchanged? [y/n/s(kip unchanged)]: "
+		default:
+			question = "  Apply? [y/n/a(ll remaining)]: "
+		}
+
+		action, err := p.ask(question)
+		if err != nil {
+			return nil, err
+		}
+
+		switch action {
+		case "y", "yes":
+			selected[change.PartID] = true
+			logging.Debug("Will promote: %s", change.PartID)
+		case "a", "all":
+			selected[change.PartID] = true
+			applyRemaining = true
+			logging.Info("Applying all remaining changes...")
+		case "s", "skip":
+			if change.IsDowngrade {
+				skipDowngrades = true
+				logging.Info("Skipping all downgrades...")
+			} else if change.IsUnchanged {
+				skipUnchanged = true
+				logging.Info("Skipping all unchanged components...")
+			}
+		default:
+			logging.Debug("Skipping: %s", change.PartID)
+		}
+	}
+
+	return selected, nil
+}
+
+func logChange(change ComponentChange) {
+	switch {
+	case change.IsUpgrade:
+		logging.Info("  ↑ %s: %s -> %s (UPGRADE)", change.PartID, change.SourceVersion, change.DestVersion)
+	case change.IsDowngrade && change.IsRollback:
+		logging.Warn("  ↻ %s: %s -> %s (ROLLBACK: %s)", change.PartID, change.SourceVersion, change.DestVersion, change.RollbackReason)
+	case change.IsDowngrade:
+		logging.Warn("  ↓ %s: %s -> %s (DOWNGRADE!)", change.PartID, change.SourceVersion, change.DestVersion)
+	default:
+		logging.Info("  = %s: %s (unchanged)", change.PartID, change.SourceVersion)
+	}
+}
+
+// every question reads a fresh line, so hitting Enter never reuses an earlier y
+type prompter struct {
+	in  *bufio.Reader
+	out io.Writer
+}
+
+func newPrompter(in io.Reader, out io.Writer) *prompter {
+	return &prompter{in: bufio.NewReader(in), out: out}
+}
+
+func (p *prompter) ask(question string) (string, error) {
+	_, _ = fmt.Fprint(p.out, question)
+	line, err := p.in.ReadString('\n')
+	if err != nil && (err != io.EOF || line == "") {
+		_, _ = fmt.Fprintln(p.out)
+		return "", errors.Newf(errors.ErrParam,
+			"no answer to %q before input ended, nothing was promoted (run without --interactive in scripts)",
+			strings.TrimSpace(question))
+	}
+	return strings.ToLower(strings.TrimSpace(line)), nil
+}
+
+func (p *prompter) confirm(question string) (bool, error) {
+	answer, err := p.ask(question)
+	if err != nil {
+		return false, err
+	}
+	return answer == "y" || answer == "yes", nil
 }
 
 // newCompareCommand creates the compare subcommand
