@@ -71,6 +71,8 @@ type PromoteRequest struct {
 	IsRollback      bool   // Mark this promotion as an intentional rollback
 	RollbackReason  string // Reason for the rollback
 	IsInteractive   bool   // Interactive mode - prompt for each component change
+	// nil promotes everything
+	SelectedPartIDs map[string]bool
 }
 
 // PromoteResponse contains the results of promotion operations.
@@ -313,6 +315,11 @@ func (s *Service) CompareDesiredStates(sourceFile, destFile, awsProfile, awsRegi
 		logging.Warn("--remove-missing enabled: %d component(s) will be deleted from destination", removedCount)
 	}
 
+	// components come out of a map, sorting keeps the prompts in the same order every run
+	sort.Slice(result.ComponentChanges, func(i, j int) bool {
+		return result.ComponentChanges[i].PartID < result.ComponentChanges[j].PartID
+	})
+
 	// Determine if comparison is valid
 	result.IsValid = !result.HasDowngrades
 	if result.HasDowngrades {
@@ -328,6 +335,19 @@ func (s *Service) CompareDesiredStates(sourceFile, destFile, awsProfile, awsRegi
 		result.TotalComponents, result.ComponentsToUpgrade, result.ComponentsUnchanged, result.ComponentsDowngraded)
 
 	return result, nil
+}
+
+func selectionIsValid(result *ComparisonResult, selected map[string]bool) (bool, string) {
+	refused := 0
+	for _, change := range result.ComponentChanges {
+		if selected[change.PartID] && change.IsDowngrade && !change.IsRollback {
+			refused++
+		}
+	}
+	if refused > 0 {
+		return false, fmt.Sprintf("Comparison failed: %d selected component(s) would be downgraded or removed - use --rollback if intentional", refused)
+	}
+	return true, ""
 }
 
 // PromoteDesiredState promotes a GitOps desired state.
@@ -436,6 +456,11 @@ func (s *Service) PromoteDesiredState(req PromoteRequest) (response *PromoteResp
 	if req.IsForcePromotion {
 		logging.Info("Force promotion enabled - skipping downgrade validation")
 		isValid = true
+	} else if req.SelectedPartIDs != nil {
+		isValid, comparisonResult.ErrorMessage = selectionIsValid(comparisonResult, req.SelectedPartIDs)
+		if !isValid {
+			logging.Error("Comparison failed: %s", comparisonResult.ErrorMessage)
+		}
 	} else {
 		isValid = comparisonResult.IsValid
 		if !isValid {
@@ -535,6 +560,11 @@ func (s *Service) PromoteDesiredState(req PromoteRequest) (response *PromoteResp
 
 	// Update destination components with source versions
 	for _, sourceComp := range componentsInOrder(sourceParser.GetManager()) {
+		if req.SelectedPartIDs != nil && !req.SelectedPartIDs[sourceComp.PartID] {
+			logging.Debug("Component not selected, leaving as is: %s", sourceComp.PartID)
+			continue
+		}
+
 		definitions := destDefinitions[sourceComp.PartID]
 		if len(definitions) == 0 {
 			missing = append(missing, sourceComp.PartID)
