@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 type PromoteBehavioralContract struct {
@@ -90,6 +92,11 @@ func (f *promoteFixture) singleFileWithContent(name, content string) string {
 	f.write(path, fmt.Sprintf("---\nschema: 4.2.0\nnamespace: legacy\ndesiredstate:\n  meta:\n    parts:\n      self: %s\n%s",
 		path, content))
 	return path
+}
+
+func sourcecodeYAML(branch, tag string) string {
+	return fmt.Sprintf("  content:\n    components:\n      sourcecode:\n        infra:\n          url: git@example.com:example/infra.git\n          branch: %q\n          tag: %q\n          path: .\n",
+		branch, tag)
 }
 
 // every component lives in the part, the root only lists it
@@ -348,6 +355,70 @@ func TestInteractivePromotion_Answers_BehavioralBDD(t *testing.T) {
 			got := f.read(dst)
 			assertTag(t, got, "api", tt.wantAPI)
 			assertTag(t, got, "web", tt.wantWeb)
+		})
+	}
+}
+
+func sourcecodeRef(t *testing.T, yamlText string) (branch, tag string) {
+	t.Helper()
+	var doc struct {
+		Desiredstate struct {
+			Content struct {
+				Components struct {
+					Sourcecode map[string]struct {
+						Branch string `yaml:"branch"`
+						Tag    string `yaml:"tag"`
+					} `yaml:"sourcecode"`
+				} `yaml:"components"`
+			} `yaml:"content"`
+		} `yaml:"desiredstate"`
+	}
+	if err := yaml.Unmarshal([]byte(yamlText), &doc); err != nil {
+		t.Fatalf("parsing destination: %v", err)
+	}
+	infra := doc.Desiredstate.Content.Components.Sourcecode["infra"]
+	return infra.Branch, infra.Tag
+}
+
+func TestPromote_SourcecodeRefIsReplaced_BehavioralBDD(t *testing.T) {
+	contract := PromoteBehavioralContract{
+		Behavior:        "Promoting a sourcecode component replaces both its branch and its tag",
+		CurrentImpl:     "updateComponentInSection writes the source branch and tag, empty ones included",
+		ExpectedOutcome: "The destination ends up on exactly the source ref",
+		Rationale:       "Empty values used to be skipped, leaving an old tag next to the new branch",
+	}
+	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
+
+	tests := []struct {
+		name                string
+		srcBranch, srcTag   string
+		dstBranch, dstTag   string
+		wantBranch, wantTag string
+	}{
+		{name: "branch replaces tag", srcBranch: "main", dstTag: "1.0.0", wantBranch: "main"},
+		{name: "tag replaces branch", srcTag: "1.1.0", dstBranch: "main", wantTag: "1.1.0"},
+		{name: "tag replaces tag", srcTag: "1.1.0", dstTag: "1.0.0", wantTag: "1.1.0"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Given: the destination on a different ref to the source
+			f := newPromoteFixture(t)
+			src := f.singleFileWithContent("src", sourcecodeYAML(tt.srcBranch, tt.srcTag))
+			dst := f.singleFileWithContent("dst", sourcecodeYAML(tt.dstBranch, tt.dstTag))
+			req := promoteRequest(src, dst)
+			req.IsForcePromotion = true
+
+			// When: the source is promoted
+			_, err := NewService(".", false).PromoteDesiredState(req)
+
+			// Then: the destination has exactly the source ref
+			if err != nil {
+				t.Fatalf("PromoteDesiredState: %v", err)
+			}
+			branch, tag := sourcecodeRef(t, f.read(dst))
+			if branch != tt.wantBranch || tag != tt.wantTag {
+				t.Errorf("branch=%q tag=%q, want branch=%q tag=%q", branch, tag, tt.wantBranch, tt.wantTag)
+			}
 		})
 	}
 }
