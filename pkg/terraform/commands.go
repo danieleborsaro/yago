@@ -1402,9 +1402,6 @@ func runImport(flags *commonFlags, tfResourceId, awsResourceId string, isUseLoca
 	logging.Info("AWS resource ID: '%s'", awsResourceId)
 	logging.Spaces()
 
-	// argTerraformResourceId = argTerraformResourceId.replace("|", "\\|")
-	tfResourceId = strings.ReplaceAll(tfResourceId, "|", "\\|")
-
 	logging.Info("Loading GitOps files...")
 	assembleResp, err := prepareTerraformAssembledInputs(flags)
 	if err != nil {
