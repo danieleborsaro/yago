@@ -476,6 +476,38 @@ func TestPromote_RemoveMissing_BehavioralBDD(t *testing.T) {
 	}
 }
 
+func TestPromote_UnsupportedLayoutFails_BehavioralBDD(t *testing.T) {
+	contract := PromoteBehavioralContract{
+		Behavior:        "Promote fails when it can't find any components in the source",
+		CurrentImpl:     "CompareDesiredStates errors when the source parses to zero components",
+		ExpectedOutcome: "An error naming the layout promote understands, with the destination unchanged",
+		Rationale:       "2.0.0 files used to parse to nothing and promote reported success without changing anything",
+	}
+	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
+
+	// Given: source and destination in the 2.0.0 layout, components straight under desiredstate
+	f := newPromoteFixture(t)
+	mk := func(name, tag string) string {
+		path := filepath.Join(f.base, name+".yaml")
+		f.write(path, fmt.Sprintf("---\nschema: 2.0.0\nnamespace: yago\nkind: DesiredState\ndesiredstate:\n  meta:\n    parts:\n      self: %s\n  components:\n    api:\n      docker:\n        eu-west-1:\n          image: example/api\n          tag: %s\n",
+			path, tag))
+		return path
+	}
+	src, dst := mk("src", "2.1.0"), mk("dst", "2.0.0")
+	before := f.read(dst)
+
+	// When: the source is promoted
+	_, err := NewService(".", false).PromoteDesiredState(promoteRequest(src, dst))
+
+	// Then: it fails instead of reporting success
+	if err == nil || !strings.Contains(err.Error(), "no components found") {
+		t.Fatalf("error = %v, want one saying no components were found", err)
+	}
+	if got := f.read(dst); got != before {
+		t.Errorf("destination changed:\n%s", got)
+	}
+}
+
 func TestPromote_ComponentDefinedTwiceIsRefused_BehavioralBDD(t *testing.T) {
 	contract := PromoteBehavioralContract{
 		Behavior:        "Refuse to promote a component the destination defines in more than one file",
