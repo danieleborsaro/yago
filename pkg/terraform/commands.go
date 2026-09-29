@@ -770,35 +770,34 @@ func runProvision(flags *commonFlags, isDryRun bool) error {
 		"AWS_REGION":  flags.awsRegion,
 	}
 
-	// Create parser with environment variables
-	parser := NewParser(flags.environment, envVars)
-	parser.SetConfigurationWorkdir(flags.configRepoWorkdir)
-
-	// Load GitOps files (desiredstate/configuration are optional for provision)
-	err := parser.LoadGitOpsFilesExtended(
-		flags.desiredstateRoot,
-		flags.awsRegion,
-		flags.configurationRoot,
-		flags.terraformSource,
-	)
-	if err != nil {
-		return fmt.Errorf("failed to load GitOps files: %w", err)
-	}
-
-	// Determine code directory
+	// the desired state is only needed to find the source code, -s on its own is enough
 	codeDir := flags.terraformSource
-	if parser.IsClonedSourceCode() {
-		codeDir = parser.GetSourceCodeDir()
+	if flags.desiredstateRoot != "" {
+		parser := NewParser(flags.environment, envVars)
+		parser.SetConfigurationWorkdir(flags.configRepoWorkdir)
+
+		err := parser.LoadGitOpsFilesExtended(
+			flags.desiredstateRoot,
+			flags.awsRegion,
+			flags.configurationRoot,
+			flags.terraformSource,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to load GitOps files: %w", err)
+		}
+		if parser.IsClonedSourceCode() {
+			codeDir = parser.GetSourceCodeDir()
+		}
 	}
 	if codeDir == "" {
-		return fmt.Errorf("terraform source directory not specified and could not be determined from desired state")
+		return fmt.Errorf("terraform source directory not specified (use -s, or -d to resolve it from the desired state)")
 	}
 
 	// Create service
 	service := newTerraformCommandService(flags, codeDir)
 
 	// Check terraform version
-	err = service.CheckDependencies()
+	err := service.CheckDependencies()
 	if err != nil {
 		return fmt.Errorf("terraform dependency check failed: %w", err)
 	}
