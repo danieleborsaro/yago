@@ -30,6 +30,9 @@ func FuzzLineWriter(f *testing.F) {
 		{"+ a\n- b", "input = <<-EOT\n      + a\n      - b\nEOT\n"},
 		{`pa"ss&w<o>rd\1`, "input = \"pa\\\"ss&w<o>rd\\\\1\"\r\n"},
 		{"abcd", "abcdabcd\n\n\nab\x1b[0mcd\n"},
+		{"token Enter a value: suffix", "token Enter a value: suffix\n"},
+		{"value: suffix", "  Enter a value: suffix\n"},
+		{"example-value", "  \x1b[1mEnter a value:\x1b[0m \x1b[0myes\n"},
 	} {
 		f.Add(seed.value, seed.output, uint64(1), uint8(255))
 		f.Add(seed.value, seed.output, uint64(42), uint8(1))
@@ -58,8 +61,13 @@ func FuzzLineWriter(f *testing.F) {
 		if w.output.String() != output {
 			t.Fatalf("kept %q, want %q", w.output.String(), output)
 		}
-		want := strings.Join(lines[:min(len(lines), int(consoleWrites))], "")
-		if console.shown.String() != want {
+		// a prompt is shown before the rest of its line, so a line can take more than one write and
+		// a failing console can stop part way through one, what's shown must still be redacted output
+		want := strings.Join(lines, "")
+		if !strings.HasPrefix(want, console.shown.String()) {
+			t.Fatalf("shown %q, want a prefix of %q", console.shown.String(), want)
+		}
+		if int(consoleWrites) > len(output) && console.shown.String() != want {
 			t.Fatalf("shown %q, want %q", console.shown.String(), want)
 		}
 	})
@@ -96,8 +104,9 @@ func BenchmarkSecretRedactor(b *testing.B) {
 	for _, bench := range []struct{ name, line string }{
 		{"plain", "  # aws_example.resource will be updated in-place, with no secrets in this line at all\n"},
 		{"coloured", "  \x1b[33m~\x1b[0m\x1b[0m resource \"aws_example\" \"resource\" {\x1b[0m with no secrets at all\n"},
+		{"long-line", strings.Repeat("x", 4<<20) + "\n"},
 	} {
-		output := strings.Repeat(bench.line, (1<<20)/len(bench.line))
+		output := strings.Repeat(bench.line, max(1, (1<<20)/len(bench.line)))
 		b.Run(bench.name, func(b *testing.B) {
 			b.ReportAllocs()
 			b.SetBytes(int64(len(output)))

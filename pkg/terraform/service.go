@@ -37,6 +37,7 @@ type Service struct {
 	assembleParser  *Parser
 	codeDir         string
 	secretReader    secretValueReader
+	stdin           io.Reader
 	stdout          io.Writer
 	stderr          io.Writer
 }
@@ -52,6 +53,7 @@ func NewService(baseDir string, enableInterpolation bool) *Service {
 		workspace:   "default",
 		isDryRun:    isDryRun,
 		codeDir:     baseDir,
+		stdin:       os.Stdin,
 		stdout:      os.Stdout,
 		stderr:      os.Stderr,
 	}
@@ -1156,6 +1158,9 @@ func (s *Service) runTerraformCommandWithSecrets(workingDir, manifestPath string
 	// Create command
 	cmd := exec.Command("terraform", args...)
 	cmd.Dir = workingDir
+	// Go gives a child an empty stdin where python passed ours through, without this terraform's
+	// confirmation prompts in destroy and unlock could only ever cancel
+	cmd.Stdin = s.stdin
 
 	// Resolve references only at execution time, never during assembly or dry runs.
 	var secrets map[string]string
