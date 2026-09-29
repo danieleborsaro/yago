@@ -218,7 +218,9 @@ Promote checks out `--source-branch` in the source's repository and loads the so
 checks out `--target-branch` and loads and writes the destination, as the Python gitops tool did. The source and
 destination can be the same path on two branches. Dry runs check out the branches too, so they read the right
 versions. If tracked files have uncommitted changes when a branch has to be checked out, promote stops. It never
-stashes them. It leaves the target branch checked out with the promoted versions for you to commit.
+stashes them. It also stops rather than overwrite an ignored file that the other branch tracks, and the branches must
+be branches, tags or commits, not file names. It leaves the target branch checked out with the promoted versions for
+you to commit.
 
 ## YAML Lookup Functions
 
