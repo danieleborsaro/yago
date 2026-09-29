@@ -1,9 +1,12 @@
 package desiredstate
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/danieleborsaro/yago/internal/core"
@@ -429,7 +432,7 @@ func (s *Service) PromoteDesiredState(req PromoteRequest) (response *PromoteResp
 	}
 
 	// Determine if promotion is valid
-	isValid := true
+	var isValid bool
 	if req.IsForcePromotion {
 		logging.Info("Force promotion enabled - skipping downgrade validation")
 		isValid = true
@@ -508,57 +511,80 @@ func (s *Service) PromoteDesiredState(req PromoteRequest) (response *PromoteResp
 		return response, errors.Wrapf(errors.ErrParse, err, "failed to parse source components")
 	}
 
-	destParser := NewComponentParser(req.IsResolveToCommit, false)
-	err = destParser.ParseFromYAML(destContent.Data, req.DestinationFile)
-	if err != nil {
-		return response, errors.Wrapf(errors.ErrParse, err, "failed to parse destination components")
+	destMeta := destDocument.GetMeta()
+	if destMeta == nil || destMeta.Data == nil {
+		return response, errors.New(errors.ErrParse, "destination metadata is nil")
 	}
 
-	sourceComponents := sourceParser.GetManager().GetAllComponents()
-	destManager := destParser.GetManager()
+	// parsed file by file so each component gets written back to the part it came from
+	destManager, destParts, err := s.parseDestinationComponents(destDocument, destMeta.Data, req)
+	if err != nil {
+		return response, err
+	}
+
+	// a component can be defined in the root and again in a part that overrides it
+	destDefinitions := make(map[string][]*VersionedComponent)
+	for _, comp := range componentsInOrder(destManager) {
+		destDefinitions[comp.PartID] = append(destDefinitions[comp.PartID], comp)
+	}
 
 	// Track which components were updated and which part files need saving
 	componentsUpdated := 0
 	modifiedPartFiles := make(map[string]bool)
+	var missing, ambiguous []string
 
 	// Update destination components with source versions
-	for _, sourceComp := range sourceComponents {
-		// Find matching component in destination
-		destComp, err := destManager.GetComponent(sourceComp.PartFile, sourceComp.PartID)
-
-		if err != nil {
-			// Component doesn't exist in destination - it's new
-			logging.Info("Adding new component: %s", sourceComp.PartID)
-			newComp := *sourceComp
-			// Use destination file path, not source file path
-			newComp.PartFile = req.DestinationFile
-			destManager.AddComponent(&newComp)
-			destManager.IsUpdated = true
-			componentsUpdated++
-			modifiedPartFiles[req.DestinationFile] = true
-		} else {
-			// Component exists - check if version needs updating
-			if destComp.Version != sourceComp.Version {
-				logging.Info("Updating component: %s (%s -> %s)",
-					sourceComp.PartID, destComp.Version, sourceComp.Version)
-
-				// Update version in destination component
-				destComp.Version = sourceComp.Version
-				destComp.Tag = sourceComp.Tag
-				destComp.Branch = sourceComp.Branch
-				destComp.IsLocked = false // Unlock when promoting
-
-				destManager.IsUpdated = true
-				componentsUpdated++
-				modifiedPartFiles[destComp.PartFile] = true
-			} else {
-				logging.Debug("Component unchanged: %s (version: %s)",
-					sourceComp.PartID, destComp.Version)
-			}
+	for _, sourceComp := range componentsInOrder(sourceParser.GetManager()) {
+		definitions := destDefinitions[sourceComp.PartID]
+		if len(definitions) == 0 {
+			missing = append(missing, sourceComp.PartID)
+			continue
 		}
+		// which definition wins depends on part order, so rather than guess and maybe update the one
+		// that's overridden, refuse
+		if len(definitions) > 1 {
+			var files []string
+			changed := false
+			for _, definition := range definitions {
+				files = append(files, definition.PartFile)
+				changed = changed || definition.Version != sourceComp.Version
+			}
+			if changed {
+				ambiguous = append(ambiguous, fmt.Sprintf("%s (in %s)", sourceComp.PartID, strings.Join(files, " and ")))
+			}
+			continue
+		}
+		destComp := definitions[0]
+
+		if destComp.Version == sourceComp.Version {
+			logging.Debug("Component unchanged: %s (version: %s)", sourceComp.PartID, destComp.Version)
+			continue
+		}
+
+		logging.Info("Updating component: %s (%s -> %s)",
+			sourceComp.PartID, destComp.Version, sourceComp.Version)
+		destComp.Version = sourceComp.Version
+		destComp.Tag = sourceComp.Tag
+		destComp.Branch = sourceComp.Branch
+		destComp.IsLocked = false // Unlock when promoting
+
+		componentsUpdated++
+		modifiedPartFiles[destComp.PartFile] = true
 	}
 
-	if !destManager.IsUpdated {
+	// adding components isn't supported yet, fail before writing anything rather than quietly drop them
+	if len(missing) > 0 {
+		return response, errors.Newf(errors.ErrFail,
+			"%d component(s) exist in the source but not in the destination, add them to %s first: %s",
+			len(missing), req.DestinationFile, strings.Join(missing, ", "))
+	}
+	if len(ambiguous) > 0 {
+		return response, errors.Newf(errors.ErrFail,
+			"%d component(s) are defined in more than one destination file, keep one definition before promoting: %s",
+			len(ambiguous), strings.Join(ambiguous, ", "))
+	}
+
+	if componentsUpdated == 0 {
 		logging.Info("No components need updating")
 		logging.Spaces()
 
@@ -567,86 +593,25 @@ func (s *Service) PromoteDesiredState(req PromoteRequest) (response *PromoteResp
 		return response, nil
 	}
 
-	// Phase 7c/9: Update component versions in each modified part file
 	logging.Spaces()
 	logging.Info("Updating %d modified part file(s)...", len(modifiedPartFiles))
 
-	// Get the destination's metadata to access part files
-	destMeta := destDocument.GetMeta()
-	if destMeta == nil || destMeta.Data == nil {
-		return response, errors.New(errors.ErrParse, "destination metadata is nil")
-	}
-
-	// For single-file desiredstates (most common case), update the root file
-	if len(modifiedPartFiles) == 1 {
-		for partFile := range modifiedPartFiles {
-			if partFile == req.DestinationFile {
-				// This is the root file - update components in the metadata structure
-				logging.Info("Updating root file: %s", partFile)
-
-				// Update components in the destination metadata's content section
-				err = s.updateComponentsInMetadata(destMeta.Data, destManager.GetAllComponents())
-				if err != nil {
-					return response, errors.Wrapf(errors.ErrFail, err, "failed to update components in metadata")
-				}
-
-				// Save the complete document (preserving schema, kind, namespace, meta)
-				err = s.saveCompleteDocument(req.DestinationFile, destMeta.Data, req.IsDryRun)
-				if err != nil {
-					return response, errors.Wrapf(errors.ErrFail, err, "failed to save destination file")
-				}
-			} else {
-				// This is a separate part file - Phase 9 multi-file support
-				logging.Info("Updating part file: %s", partFile)
-
-				// Load the individual part file
-				partContent, err := s.loadPartFile(partFile)
-				if err != nil {
-					logging.Warn("Failed to load part file %s: %v", partFile, err)
-					continue
-				}
-
-				// Update components in this part
-				partComponents := destManager.GetComponentsByPartFile(partFile)
-				err = s.updateComponentsInPartContent(partContent, partComponents)
-				if err != nil {
-					logging.Warn("Failed to update components in part %s: %v", partFile, err)
-					continue
-				}
-
-				// Save the part file
-				err = destDocument.SavePart(partFile, partContent, req.IsDryRun)
-				if err != nil {
-					return response, errors.Wrapf(errors.ErrFail, err, "failed to save part file %s", partFile)
-				}
-			}
+	for _, partFile := range sortedKeys(modifiedPartFiles) {
+		data, path := destParts[partFile], filepath.Join(destDocument.GetWorkdir(), partFile)
+		if partFile == req.DestinationFile {
+			data, path = destMeta.Data, req.DestinationFile
 		}
-	} else {
-		// Multi-file desiredstate - Phase 9
-		logging.Info("Processing multi-file desiredstate...")
-		for partFile := range modifiedPartFiles {
-			logging.Info("Updating part file: %s", partFile)
 
-			// Load the individual part file
-			partContent, err := s.loadPartFile(partFile)
-			if err != nil {
-				logging.Warn("Failed to load part file %s: %v", partFile, err)
-				continue
-			}
-
-			// Update components in this part
-			partComponents := destManager.GetComponentsByPartFile(partFile)
-			err = s.updateComponentsInPartContent(partContent, partComponents)
-			if err != nil {
-				logging.Warn("Failed to update components in part %s: %v", partFile, err)
-				continue
-			}
-
-			// Save the part file
-			err = destDocument.SavePart(partFile, partContent, req.IsDryRun)
-			if err != nil {
-				return response, errors.Wrapf(errors.ErrFail, err, "failed to save part file %s", partFile)
-			}
+		logging.Info("Updating %s", partFile)
+		if err := applyComponentChanges(data, destManager.GetComponentsByPartFile(partFile)); err != nil {
+			return response, errors.Wrapf(errors.ErrFail, err, "failed to update components in %s", partFile)
+		}
+		content, err := marshalDesiredState(data)
+		if err != nil {
+			return response, errors.Wrapf(errors.ErrFail, err, "failed to render %s", partFile)
+		}
+		if err := os.WriteFile(path, content, 0o644); err != nil {
+			return response, errors.Wrapf(errors.ErrFail, err, "failed to save %s", partFile)
 		}
 	}
 
@@ -660,182 +625,82 @@ func (s *Service) PromoteDesiredState(req PromoteRequest) (response *PromoteResp
 	return response, nil
 }
 
-// updateComponentVersionInYAML updates a component's version in the YAML data structure.
-// This navigates the YAML path and updates the appropriate version field(s).
-func (s *Service) updateComponentVersionInYAML(yamlData map[string]interface{}, comp *VersionedComponent) error {
-	// Navigate to desiredstate.content.components
-	desiredstate, ok := yamlData["desiredstate"].(map[string]interface{})
-	if !ok {
-		return fmt.Errorf("desiredstate section not found")
+// part components are keyed by the path the root lists, which is relative to the document workdir
+func (s *Service) parseDestinationComponents(destDocument *core.GitOpsDocument, rootData map[string]interface{}, req PromoteRequest) (*ComponentManager, map[string]map[string]interface{}, error) {
+	destParser := NewComponentParser(req.IsResolveToCommit, false)
+	if err := destParser.ParseFromYAML(rootData, req.DestinationFile); err != nil {
+		return nil, nil, errors.Wrapf(errors.ErrParse, err, "failed to parse destination components")
 	}
 
-	content, ok := desiredstate["content"].(map[string]interface{})
-	if !ok {
-		return fmt.Errorf("content section not found")
+	partFiles, err := destDocument.GetAllPartFiles(destDocument.GetPropertyPartsToLoad())
+	if err != nil {
+		return nil, nil, errors.Wrapf(errors.ErrParse, err, "failed to list destination part files")
 	}
 
-	components, ok := content["components"].(map[string]interface{})
-	if !ok {
+	parts := make(map[string]map[string]interface{})
+	for _, partCombo := range partFiles {
+		for _, partFile := range partCombo {
+			content, err := s.loadPartFile(filepath.Join(destDocument.GetWorkdir(), partFile))
+			if err != nil {
+				return nil, nil, errors.Wrapf(errors.ErrParse, err, "failed to load destination part %s", partFile)
+			}
+			if err := destParser.ParseFromYAML(content, partFile); err != nil {
+				return nil, nil, errors.Wrapf(errors.ErrParse, err, "failed to parse destination part %s", partFile)
+			}
+			parts[partFile] = content
+		}
+	}
+
+	return destParser.GetManager(), parts, nil
+}
+
+func componentsInOrder(cm *ComponentManager) []*VersionedComponent {
+	components := cm.GetAllComponents()
+	sort.Slice(components, func(i, j int) bool { return components[i].PartID < components[j].PartID })
+	return components
+}
+
+func sortedKeys(set map[string]bool) []string {
+	keys := make([]string, 0, len(set))
+	for k := range set {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func applyComponentChanges(data map[string]interface{}, updates []*VersionedComponent) error {
+	var componentsSection map[string]interface{}
+	if desiredstate, ok := data["desiredstate"].(map[string]interface{}); ok {
+		if content, ok := desiredstate["content"].(map[string]interface{}); ok {
+			componentsSection, _ = content["components"].(map[string]interface{})
+		}
+	} else {
+		componentsSection, _ = data["components"].(map[string]interface{})
+	}
+	if componentsSection == nil {
 		return fmt.Errorf("components section not found")
 	}
 
-	// Parse PartID to navigate to the component
-	// PartID format examples:
-	// - "sourcecode.infrastructure-repo"
-	// - "artifacts.backend-service.docker.us-east-1"
-	// - "artifacts.config-data.s3.us-east-1"
-
-	parts := strings.Split(comp.PartID, ".")
-	if len(parts) < 2 {
-		return fmt.Errorf("invalid PartID format: %s", comp.PartID)
+	for _, comp := range updates {
+		if err := updateComponentInSection(componentsSection, comp); err != nil {
+			return fmt.Errorf("failed to update component %s: %w", comp.PartID, err)
+		}
 	}
-
-	section := parts[0]       // "sourcecode" or "artifacts"
-	componentName := parts[1] // component name
-
-	sectionData, ok := components[section].(map[string]interface{})
-	if !ok {
-		// Section doesn't exist yet - create it
-		sectionData = make(map[string]interface{})
-		components[section] = sectionData
-	}
-
-	componentData, ok := sectionData[componentName].(map[string]interface{})
-	if !ok {
-		// Component doesn't exist - this is a new component, skip for now
-		// TODO: Implement adding new components to YAML
-		logging.Debug("Component %s not found in YAML, skipping", comp.PartID)
-		return nil
-	}
-
-	// Update the version based on component type
-	switch comp.Type {
-	case ComponentTypeSourcecode:
-		// For sourcecode: update "tag" field
-		if comp.Tag != "" {
-			componentData["tag"] = comp.Tag
-			logging.Debug("Updated %s tag to %s", comp.PartID, comp.Tag)
-		}
-		if comp.Branch != "" {
-			componentData["branch"] = comp.Branch
-			logging.Debug("Updated %s branch to %s", comp.PartID, comp.Branch)
-		}
-
-	case ComponentTypeDocker, ComponentTypeS3, ComponentTypeAMI:
-		// For artifacts: navigate to type.region and update "tag" or "version_id"
-		if len(parts) < 4 {
-			return fmt.Errorf("invalid artifact PartID format: %s", comp.PartID)
-		}
-
-		artifactType := parts[2] // "docker", "s3", "ami", "web"
-		region := parts[3]       // region name
-
-		typeData, ok := componentData[artifactType].(map[string]interface{})
-		if !ok {
-			logging.Warn("Artifact type %s not found for %s", artifactType, comp.PartID)
-			return nil
-		}
-
-		regionData, ok := typeData[region].(map[string]interface{})
-		if !ok {
-			logging.Warn("Region %s not found for %s", region, comp.PartID)
-			return nil
-		}
-
-		// Update version field based on artifact type
-		switch artifactType {
-		case "docker":
-			regionData["tag"] = comp.Version
-			logging.Debug("Updated %s docker tag to %s", comp.PartID, comp.Version)
-		case "s3":
-			regionData["version_id"] = comp.Version
-			logging.Debug("Updated %s s3 version_id to %s", comp.PartID, comp.Version)
-		case "ami":
-			regionData["name"] = comp.Version
-			logging.Debug("Updated %s ami name to %s", comp.PartID, comp.Version)
-		case "web":
-			regionData["uri"] = comp.URL // For web artifacts, URL contains the full URI with version
-			logging.Debug("Updated %s web uri to %s", comp.PartID, comp.URL)
-		}
-
-	default:
-		logging.Warn("Unknown component type %s for %s", comp.Type, comp.PartID)
-	}
-
 	return nil
 }
 
-// savePartFile saves YAML data to a file, with optional dry-run mode.
-func (s *Service) savePartFile(filePath string, yamlData map[string]interface{}, isDryRun bool) error {
-	return yamlutil.SaveYAMLFile(filePath, yamlData, isDryRun)
+func marshalDesiredState(data map[string]interface{}) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(data); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
-// updateComponentsInMetadata updates component versions in the metadata YAML structure.
-// This preserves the complete document structure including schema, kind, namespace, and meta sections.
-func (s *Service) updateComponentsInMetadata(metadata map[string]interface{}, components []*VersionedComponent) error {
-	// Navigate to desiredstate.content.components
-	desiredstate, ok := metadata["desiredstate"].(map[string]interface{})
-	if !ok {
-		return fmt.Errorf("desiredstate section not found in metadata")
-	}
-
-	content, ok := desiredstate["content"].(map[string]interface{})
-	if !ok {
-		return fmt.Errorf("content section not found in desiredstate")
-	}
-
-	componentsSection, ok := content["components"].(map[string]interface{})
-	if !ok {
-		return fmt.Errorf("components section not found in content")
-	}
-
-	// Update each component
-	for _, comp := range components {
-		err := s.updateComponentInSection(componentsSection, comp)
-		if err != nil {
-			logging.Warn("Failed to update component %s: %v", comp.PartID, err)
-			// Continue with other components
-		}
-	}
-
-	return nil
-}
-
-// updateComponentsInPartContent updates component versions in a part file's content.
-func (s *Service) updateComponentsInPartContent(partContent map[string]interface{}, components []*VersionedComponent) error {
-	// Check if this is a full desiredstate structure or just content
-	var componentsSection map[string]interface{}
-
-	if desiredstate, ok := partContent["desiredstate"].(map[string]interface{}); ok {
-		// Full desiredstate structure
-		if content, ok := desiredstate["content"].(map[string]interface{}); ok {
-			if comp, ok := content["components"].(map[string]interface{}); ok {
-				componentsSection = comp
-			}
-		}
-	} else if components, ok := partContent["components"].(map[string]interface{}); ok {
-		// Direct components section
-		componentsSection = components
-	}
-
-	if componentsSection == nil {
-		return fmt.Errorf("components section not found in part content")
-	}
-
-	// Update each component
-	for _, comp := range components {
-		err := s.updateComponentInSection(componentsSection, comp)
-		if err != nil {
-			logging.Warn("Failed to update component %s: %v", comp.PartID, err)
-			// Continue with other components
-		}
-	}
-
-	return nil
-}
-
-// updateComponentInSection updates a single component in a components section.
-func (s *Service) updateComponentInSection(componentsSection map[string]interface{}, comp *VersionedComponent) error {
+func updateComponentInSection(componentsSection map[string]interface{}, comp *VersionedComponent) error {
 	// Parse PartID to navigate to the component
 	// PartID format examples:
 	// - "sourcecode.infrastructure-repo"
@@ -909,12 +774,6 @@ func (s *Service) updateComponentInSection(componentsSection map[string]interfac
 	}
 
 	return nil
-}
-
-// saveCompleteDocument saves a complete document including all top-level fields.
-// This preserves schema, kind, namespace, and meta sections.
-func (s *Service) saveCompleteDocument(filePath string, documentData map[string]interface{}, isDryRun bool) error {
-	return yamlutil.SaveYAMLFile(filePath, documentData, isDryRun)
 }
 
 // loadPartFile loads a part file and returns its YAML content.
