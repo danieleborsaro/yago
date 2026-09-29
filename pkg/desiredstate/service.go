@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -14,6 +16,7 @@ import (
 	"github.com/danieleborsaro/yago/internal/utils/errors"
 	"github.com/danieleborsaro/yago/internal/utils/jira"
 	"github.com/danieleborsaro/yago/internal/utils/logging"
+	uRepo "github.com/danieleborsaro/yago/internal/utils/repo"
 	yamlutil "github.com/danieleborsaro/yago/internal/utils/yaml"
 	"github.com/danieleborsaro/yago/pkg/aws"
 	"github.com/danieleborsaro/yago/pkg/wrapper"
@@ -120,27 +123,35 @@ type ComponentChange struct {
 // Enhanced with rollback detection and missing component tracking.
 func (s *Service) CompareDesiredStates(sourceFile, destFile, awsProfile, awsRegion string,
 	isResolveToCommit, isRemoveMissing, isRollback bool, rollbackReason string) (*ComparisonResult, error) {
+	logging.Debug("Comparing desiredstates: %s vs %s", sourceFile, destFile)
+
+	sourceDocument := core.NewGitOpsDocument()
+	if err := sourceDocument.LoadGitOpsFile(sourceFile, true, nil); err != nil {
+		return &ComparisonResult{}, errors.Wrapf(errors.ErrParse, err, "failed to load source file")
+	}
+	destDocument := core.NewGitOpsDocument()
+	if err := destDocument.LoadGitOpsFile(destFile, true, nil); err != nil {
+		return &ComparisonResult{}, errors.Wrapf(errors.ErrParse, err, "failed to load destination file")
+	}
+	return s.compareDocuments(sourceDocument, destDocument, sourceFile, destFile,
+		isResolveToCommit, isRemoveMissing, isRollback, rollbackReason)
+}
+
+// takes loaded documents so each side can come from its own branch
+func (s *Service) compareDocuments(sourceDocument, destDocument *core.GitOpsDocument, sourceFile, destFile string,
+	isResolveToCommit, isRemoveMissing, isRollback bool, rollbackReason string) (*ComparisonResult, error) {
 	result := &ComparisonResult{
 		ComponentChanges: make([]ComponentChange, 0),
 	}
 
-	logging.Debug("Comparing desiredstates: %s vs %s", sourceFile, destFile)
-
-	// Load and parse source desiredstate
 	logging.Debug("Parsing source desiredstate components...")
-	sourceDocument := core.NewGitOpsDocument()
-	err := sourceDocument.LoadGitOpsFile(sourceFile, true, nil)
-	if err != nil {
-		return result, errors.Wrapf(errors.ErrParse, err, "failed to load source file")
-	}
-
 	sourceContent := sourceDocument.GetContent()
 	if sourceContent == nil || sourceContent.Data == nil {
 		return result, errors.New(errors.ErrParse, "source desiredstate content is nil")
 	}
 
 	sourceParser := NewComponentParser(isResolveToCommit, false)
-	err = sourceParser.ParseFromYAML(sourceContent.Data, sourceFile)
+	err := sourceParser.ParseFromYAML(sourceContent.Data, sourceFile)
 	if err != nil {
 		return result, errors.Wrapf(errors.ErrParse, err, "failed to parse source components")
 	}
@@ -153,14 +164,7 @@ func (s *Service) CompareDesiredStates(sourceFile, destFile, awsProfile, awsRegi
 			sourceFile)
 	}
 
-	// Load and parse destination desiredstate
 	logging.Debug("Parsing destination desiredstate components...")
-	destDocument := core.NewGitOpsDocument()
-	err = destDocument.LoadGitOpsFile(destFile, true, nil)
-	if err != nil {
-		return result, errors.Wrapf(errors.ErrParse, err, "failed to load destination file")
-	}
-
 	destContent := destDocument.GetContent()
 	if destContent == nil || destContent.Data == nil {
 		return result, errors.New(errors.ErrParse, "destination desiredstate content is nil")
@@ -359,24 +363,9 @@ func selectionIsValid(result *ComparisonResult, selected map[string]bool) (bool,
 
 // PromoteDesiredState promotes a GitOps desired state.
 // Enhanced in Phase 7 with component-level version comparison and validation.
-func (s *Service) PromoteDesiredState(req PromoteRequest) (response *PromoteResponse, err error) {
-	response = &PromoteResponse{DestinationPath: req.DestinationFile}
-
-	// Validate all required parameters first
-	if req.DesiredStateFile == "" {
-		return nil, errors.NewParamError("desiredstate file must be specified")
-	}
-	if req.DestinationFile == "" {
-		return nil, errors.NewParamError("destination file must be specified")
-	}
-	if req.AWSRegion == "" {
-		return nil, errors.NewParamError("AWS region must be specified")
-	}
-	if req.SourceBranch == "" {
-		return nil, errors.NewParamError("source branch must be specified")
-	}
-	if req.TargetBranch == "" {
-		return nil, errors.NewParamError("target branch must be specified")
+func (s *Service) PromoteDesiredState(req PromoteRequest) (*PromoteResponse, error) {
+	if err := validatePromoteRequest(req); err != nil {
+		return nil, err
 	}
 
 	// Log promotion parameters
@@ -395,43 +384,135 @@ func (s *Service) PromoteDesiredState(req PromoteRequest) (response *PromoteResp
 
 	logging.Spaces()
 
-	// Load and validate source file (with parts assembled for component parsing)
-	logging.Info("Loading source desiredstate...")
-	sourceDocument := s.GetDocument()
-	err = sourceDocument.LoadGitOpsFile(req.DesiredStateFile, true, nil)
+	p, err := s.preparePromotion(req, s.GetDocument())
 	if err != nil {
-		return response, errors.Wrapf(errors.ErrParse, err, "failed to load source file")
+		return &PromoteResponse{DestinationPath: req.DestinationFile}, err
+	}
+	return s.applyPromotion(req, p)
+}
+
+func validatePromoteRequest(req PromoteRequest) error {
+	if req.DesiredStateFile == "" {
+		return errors.NewParamError("desiredstate file must be specified")
+	}
+	if req.DestinationFile == "" {
+		return errors.NewParamError("destination file must be specified")
+	}
+	if req.AWSRegion == "" {
+		return errors.NewParamError("AWS region must be specified")
+	}
+	if req.SourceBranch == "" {
+		return errors.NewParamError("source branch must be specified")
+	}
+	if req.TargetBranch == "" {
+		return errors.NewParamError("target branch must be specified")
+	}
+	return nil
+}
+
+type promotion struct {
+	source, dest *core.GitOpsDocument
+	comparison   *ComparisonResult
+	destination  *destinationSnapshot
+}
+
+// the destination as it was compared, an interactive promotion is confirmed a while later and the
+// confirmation only covers this, so it's written on top of these bytes and refused if the files or the
+// checkout changed since
+type destinationSnapshot struct {
+	head  uRepo.Head
+	files map[string][]byte
+}
+
+func snapshotDestination(doc *core.GitOpsDocument, root string, head uRepo.Head) (*destinationSnapshot, error) {
+	paths := []string{root}
+	partFiles, err := doc.GetAllPartFiles(doc.GetPropertyPartsToLoad())
+	if err != nil {
+		return nil, errors.Wrapf(errors.ErrParse, err, "failed to list destination part files")
+	}
+	for _, partCombo := range partFiles {
+		for _, partFile := range partCombo {
+			paths = append(paths, filepath.Join(doc.GetWorkdir(), partFile))
+		}
 	}
 
-	// Load and validate destination file (with parts assembled for component parsing)
-	logging.Info("Loading destination desiredstate...")
-	destDocument := core.NewGitOpsDocument()
-	err = destDocument.LoadGitOpsFile(req.DestinationFile, true, nil)
+	snapshot := &destinationSnapshot{head: head, files: make(map[string][]byte, len(paths))}
+	for _, path := range paths {
+		content, err := os.ReadFile(filepath.Clean(path))
+		if err != nil {
+			return nil, errors.Wrapf(errors.ErrParse, err, "failed to read destination file %s", path)
+		}
+		snapshot.files[path] = content
+	}
+	return snapshot, nil
+}
+
+func (d *destinationSnapshot) verify(root string) error {
+	head, err := uRepo.WorktreeHead(root)
 	if err != nil {
-		return response, errors.Wrapf(errors.ErrParse, err, "failed to load destination file")
+		return errors.Wrapf(errors.ErrFail, err, "failed to read what the destination has checked out")
+	}
+	if head != d.head {
+		return errors.Newf(errors.ErrFail,
+			"the destination was on %s when it was compared and is on %s now, nothing was written, run the promotion again",
+			d.head, head)
+	}
+	for _, path := range slices.Sorted(maps.Keys(d.files)) {
+		current, err := os.ReadFile(filepath.Clean(path))
+		if err != nil || !bytes.Equal(current, d.files[path]) {
+			return errors.Newf(errors.ErrFail,
+				"%s changed after it was compared, nothing was written, run the promotion again", path)
+		}
+	}
+	return nil
+}
+
+// the source is loaded with all its parts before the target branch is checked out, so the same path on
+// two branches is read on each, and the comparison works on the loaded documents without reading the
+// source again
+func (s *Service) preparePromotion(req PromoteRequest, source *core.GitOpsDocument) (*promotion, error) {
+	logging.Info("Loading source desiredstate from %s...", req.SourceBranch)
+	if err := uRepo.SwitchWorktree(req.DesiredStateFile, req.SourceBranch); err != nil {
+		return nil, errors.Wrapf(errors.ErrFail, err, "failed to check out the source branch")
+	}
+	if err := source.LoadGitOpsFile(req.DesiredStateFile, true, nil); err != nil {
+		return nil, errors.Wrapf(errors.ErrParse, err, "failed to load source file")
+	}
+
+	logging.Info("Loading destination desiredstate from %s...", req.TargetBranch)
+	if err := uRepo.SwitchWorktree(req.DestinationFile, req.TargetBranch); err != nil {
+		return nil, errors.Wrapf(errors.ErrFail, err, "failed to check out the target branch")
+	}
+	head, err := uRepo.WorktreeHead(req.DestinationFile)
+	if err != nil {
+		return nil, errors.Wrapf(errors.ErrFail, err, "failed to read what the destination has checked out")
+	}
+	dest := core.NewGitOpsDocument()
+	if err := dest.LoadGitOpsFile(req.DestinationFile, true, nil); err != nil {
+		return nil, errors.Wrapf(errors.ErrParse, err, "failed to load destination file")
+	}
+	destination, err := snapshotDestination(dest, req.DestinationFile, head)
+	if err != nil {
+		return nil, err
 	}
 
 	logging.Spaces()
-
-	// Phase 7: Perform component-level comparison
 	logging.Info("Comparing desiredstates component-by-component...")
 	logging.Info("Source:      %s:%s", req.DesiredStateFile, req.SourceBranch)
 	logging.Info("Destination: %s:%s", req.DestinationFile, req.TargetBranch)
 	logging.Spaces()
 
-	comparisonResult, err := s.CompareDesiredStates(
-		req.DesiredStateFile,
-		req.DestinationFile,
-		req.AWSProfile,
-		req.AWSRegion,
-		req.IsResolveToCommit,
-		req.IsRemoveMissing,
-		req.IsRollback,
-		req.RollbackReason,
-	)
+	comparison, err := s.compareDocuments(source, dest, req.DesiredStateFile, req.DestinationFile,
+		req.IsResolveToCommit, req.IsRemoveMissing, req.IsRollback, req.RollbackReason)
 	if err != nil {
-		return response, errors.Wrapf(errors.ErrFail, err, "failed to compare desiredstates")
+		return nil, errors.Wrapf(errors.ErrFail, err, "failed to compare desiredstates")
 	}
+	return &promotion{source: source, dest: dest, comparison: comparison, destination: destination}, nil
+}
+
+func (s *Service) applyPromotion(req PromoteRequest, p *promotion) (response *PromoteResponse, err error) {
+	response = &PromoteResponse{DestinationPath: req.DestinationFile}
+	sourceDocument, destDocument, comparisonResult := p.source, p.dest, p.comparison
 
 	response.ComparisonResult = comparisonResult
 
@@ -557,7 +638,7 @@ func (s *Service) PromoteDesiredState(req PromoteRequest) (response *PromoteResp
 	}
 
 	// parsed file by file so each component gets written back to the part it came from
-	destManager, destParts, err := s.parseDestinationComponents(destDocument, destMeta.Data, req)
+	destManager, destParts, err := s.parseDestinationComponents(destDocument, destMeta.Data, req, p.destination.files)
 	if err != nil {
 		return response, err
 	}
@@ -680,6 +761,9 @@ func (s *Service) PromoteDesiredState(req PromoteRequest) (response *PromoteResp
 		writes = append(writes, pendingWrite{path: path, content: content})
 	}
 
+	if err := p.destination.verify(req.DestinationFile); err != nil {
+		return response, err
+	}
 	if err := writeAllOrNothing(writes); err != nil {
 		return response, errors.Wrapf(errors.ErrFail, err, "failed to save the destination")
 	}
@@ -695,7 +779,7 @@ func (s *Service) PromoteDesiredState(req PromoteRequest) (response *PromoteResp
 }
 
 // part components are keyed by the path the root lists, which is relative to the document workdir
-func (s *Service) parseDestinationComponents(destDocument *core.GitOpsDocument, rootData map[string]interface{}, req PromoteRequest) (*ComponentManager, map[string]map[string]interface{}, error) {
+func (s *Service) parseDestinationComponents(destDocument *core.GitOpsDocument, rootData map[string]interface{}, req PromoteRequest, files map[string][]byte) (*ComponentManager, map[string]map[string]interface{}, error) {
 	destParser := NewComponentParser(req.IsResolveToCommit, false)
 	if err := destParser.ParseFromYAML(rootData, req.DestinationFile); err != nil {
 		return nil, nil, errors.Wrapf(errors.ErrParse, err, "failed to parse destination components")
@@ -709,7 +793,7 @@ func (s *Service) parseDestinationComponents(destDocument *core.GitOpsDocument, 
 	parts := make(map[string]map[string]interface{})
 	for _, partCombo := range partFiles {
 		for _, partFile := range partCombo {
-			content, err := s.loadPartFile(filepath.Join(destDocument.GetWorkdir(), partFile))
+			content, err := parsePartFile(filepath.Join(destDocument.GetWorkdir(), partFile), files)
 			if err != nil {
 				return nil, nil, errors.Wrapf(errors.ErrParse, err, "failed to load destination part %s", partFile)
 			}
@@ -935,12 +1019,10 @@ func updateComponentInSection(componentsSection map[string]interface{}, comp *Ve
 	return nil
 }
 
-// loadPartFile loads a part file and returns its YAML content.
-func (s *Service) loadPartFile(filePath string) (map[string]interface{}, error) {
-	// Read the file
-	data, err := os.ReadFile(filePath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read part file %s: %w", filePath, err)
+func parsePartFile(filePath string, files map[string][]byte) (map[string]interface{}, error) {
+	data, ok := files[filePath]
+	if !ok {
+		return nil, fmt.Errorf("part file %s wasn't read when the destination was compared", filePath)
 	}
 
 	// Parse YAML

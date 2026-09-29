@@ -457,8 +457,8 @@ func newPromoteCommand() *cobra.Command {
 	cmd.Flags().StringVarP(&awsRegion, "aws-region", "r", "", "AWS target region")
 	cmd.Flags().StringVarP(&config.DesiredStateFile, "desiredstate-root", "d", "", "DesiredState file")
 	cmd.Flags().StringVarP(&config.DestinationFile, "desiredstate-destination-root", "D", "", "DesiredState destination file")
-	cmd.Flags().StringVarP(&sourceBranch, "source-branch", "S", "", "Target branch for promoting desiredstate")
-	cmd.Flags().StringVarP(&targetBranch, "target-branch", "T", "", "Target branch for promoting desiredstate")
+	cmd.Flags().StringVarP(&sourceBranch, "source-branch", "S", "", "Branch checked out to read the source desiredstate")
+	cmd.Flags().StringVarP(&targetBranch, "target-branch", "T", "", "Branch checked out to read and write the destination desiredstate")
 	cmd.Flags().BoolVarP(&isResolveToCommit, "resolve-to-commits", "R", false, "Resolve tags and references to a Git commit")
 	cmd.Flags().BoolVarP(&isCompareEnvironments, "compare-environments", "E", false, "Do not promote desiredstates, just compare them")
 	cmd.Flags().BoolVarP(&isForcePromotion, "force-promotion", "F", false, "Forced promotion of desiredstate")
@@ -554,21 +554,16 @@ func runInteractivePromotion(service *Service, req PromoteRequest, in io.Reader,
 	logging.Info("Destination: %s", req.DestinationFile)
 	logging.Spaces()
 
-	// First, compare the files to see what changes would be made
+	if err := validatePromoteRequest(req); err != nil {
+		return err
+	}
+
 	logging.Info("Comparing files...")
-	compareResult, err := service.CompareDesiredStates(
-		req.DesiredStateFile,
-		req.DestinationFile,
-		req.AWSProfile,
-		req.AWSRegion,
-		req.IsResolveToCommit,
-		req.IsRemoveMissing,
-		req.IsRollback,
-		req.RollbackReason,
-	)
+	prepared, err := service.preparePromotion(req, core.NewGitOpsDocument())
 	if err != nil {
 		return err
 	}
+	compareResult := prepared.comparison
 
 	// Display summary
 	logging.Spaces()
@@ -640,7 +635,7 @@ func runInteractivePromotion(service *Service, req PromoteRequest, in io.Reader,
 	logging.Spaces()
 	logging.Info("Executing promotion...")
 
-	response, err := service.PromoteDesiredState(req)
+	response, err := service.applyPromotion(req, prepared)
 	if err != nil {
 		return err
 	}
