@@ -219,8 +219,9 @@ checks out `--target-branch` and loads and writes the destination, as the Python
 destination can be the same path on two branches. Dry runs check out the branches too, so they read the right
 versions. If tracked files have uncommitted changes when a branch has to be checked out, promote stops. It never
 stashes them. It also stops rather than overwrite an ignored file that the other branch tracks, and the branches must
-be branches, tags or commits, not file names. It leaves the target branch checked out with the promoted versions for
-you to commit.
+be branches, tags or commits, not file names. If the destination's files or checked out commit change between the
+comparison and the write, as they can while `--interactive` waits for answers, it writes nothing. It leaves the
+target branch checked out with the promoted versions for you to commit.
 
 ## YAML Lookup Functions
 
