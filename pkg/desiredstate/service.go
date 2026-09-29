@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -411,6 +413,58 @@ func validatePromoteRequest(req PromoteRequest) error {
 type promotion struct {
 	source, dest *core.GitOpsDocument
 	comparison   *ComparisonResult
+	destination  *destinationSnapshot
+}
+
+// the destination as it was compared, an interactive promotion is confirmed a while later and the
+// confirmation only covers this, so it's written on top of these bytes and refused if the files or the
+// checkout changed since
+type destinationSnapshot struct {
+	head  uRepo.Head
+	files map[string][]byte
+}
+
+func snapshotDestination(doc *core.GitOpsDocument, root string, head uRepo.Head) (*destinationSnapshot, error) {
+	paths := []string{root}
+	partFiles, err := doc.GetAllPartFiles(doc.GetPropertyPartsToLoad())
+	if err != nil {
+		return nil, errors.Wrapf(errors.ErrParse, err, "failed to list destination part files")
+	}
+	for _, partCombo := range partFiles {
+		for _, partFile := range partCombo {
+			paths = append(paths, filepath.Join(doc.GetWorkdir(), partFile))
+		}
+	}
+
+	snapshot := &destinationSnapshot{head: head, files: make(map[string][]byte, len(paths))}
+	for _, path := range paths {
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return nil, errors.Wrapf(errors.ErrParse, err, "failed to read destination file %s", path)
+		}
+		snapshot.files[path] = content
+	}
+	return snapshot, nil
+}
+
+func (d *destinationSnapshot) verify(root string) error {
+	head, err := uRepo.WorktreeHead(root)
+	if err != nil {
+		return errors.Wrapf(errors.ErrFail, err, "failed to read what the destination has checked out")
+	}
+	if head != d.head {
+		return errors.Newf(errors.ErrFail,
+			"the destination was on %s when it was compared and is on %s now, nothing was written, run the promotion again",
+			d.head, head)
+	}
+	for _, path := range slices.Sorted(maps.Keys(d.files)) {
+		current, err := os.ReadFile(path)
+		if err != nil || !bytes.Equal(current, d.files[path]) {
+			return errors.Newf(errors.ErrFail,
+				"%s changed after it was compared, nothing was written, run the promotion again", path)
+		}
+	}
+	return nil
 }
 
 // the source is loaded with all its parts before the target branch is checked out, so the same path on
@@ -429,9 +483,17 @@ func (s *Service) preparePromotion(req PromoteRequest, source *core.GitOpsDocume
 	if err := uRepo.SwitchWorktree(req.DestinationFile, req.TargetBranch); err != nil {
 		return nil, errors.Wrapf(errors.ErrFail, err, "failed to check out the target branch")
 	}
+	head, err := uRepo.WorktreeHead(req.DestinationFile)
+	if err != nil {
+		return nil, errors.Wrapf(errors.ErrFail, err, "failed to read what the destination has checked out")
+	}
 	dest := core.NewGitOpsDocument()
 	if err := dest.LoadGitOpsFile(req.DestinationFile, true, nil); err != nil {
 		return nil, errors.Wrapf(errors.ErrParse, err, "failed to load destination file")
+	}
+	destination, err := snapshotDestination(dest, req.DestinationFile, head)
+	if err != nil {
+		return nil, err
 	}
 
 	logging.Spaces()
@@ -445,7 +507,7 @@ func (s *Service) preparePromotion(req PromoteRequest, source *core.GitOpsDocume
 	if err != nil {
 		return nil, errors.Wrapf(errors.ErrFail, err, "failed to compare desiredstates")
 	}
-	return &promotion{source: source, dest: dest, comparison: comparison}, nil
+	return &promotion{source: source, dest: dest, comparison: comparison, destination: destination}, nil
 }
 
 func (s *Service) applyPromotion(req PromoteRequest, p *promotion) (response *PromoteResponse, err error) {
@@ -576,7 +638,7 @@ func (s *Service) applyPromotion(req PromoteRequest, p *promotion) (response *Pr
 	}
 
 	// parsed file by file so each component gets written back to the part it came from
-	destManager, destParts, err := s.parseDestinationComponents(destDocument, destMeta.Data, req)
+	destManager, destParts, err := s.parseDestinationComponents(destDocument, destMeta.Data, req, p.destination.files)
 	if err != nil {
 		return response, err
 	}
@@ -699,6 +761,9 @@ func (s *Service) applyPromotion(req PromoteRequest, p *promotion) (response *Pr
 		writes = append(writes, pendingWrite{path: path, content: content})
 	}
 
+	if err := p.destination.verify(req.DestinationFile); err != nil {
+		return response, err
+	}
 	if err := writeAllOrNothing(writes); err != nil {
 		return response, errors.Wrapf(errors.ErrFail, err, "failed to save the destination")
 	}
@@ -714,7 +779,7 @@ func (s *Service) applyPromotion(req PromoteRequest, p *promotion) (response *Pr
 }
 
 // part components are keyed by the path the root lists, which is relative to the document workdir
-func (s *Service) parseDestinationComponents(destDocument *core.GitOpsDocument, rootData map[string]interface{}, req PromoteRequest) (*ComponentManager, map[string]map[string]interface{}, error) {
+func (s *Service) parseDestinationComponents(destDocument *core.GitOpsDocument, rootData map[string]interface{}, req PromoteRequest, files map[string][]byte) (*ComponentManager, map[string]map[string]interface{}, error) {
 	destParser := NewComponentParser(req.IsResolveToCommit, false)
 	if err := destParser.ParseFromYAML(rootData, req.DestinationFile); err != nil {
 		return nil, nil, errors.Wrapf(errors.ErrParse, err, "failed to parse destination components")
@@ -728,7 +793,7 @@ func (s *Service) parseDestinationComponents(destDocument *core.GitOpsDocument, 
 	parts := make(map[string]map[string]interface{})
 	for _, partCombo := range partFiles {
 		for _, partFile := range partCombo {
-			content, err := s.loadPartFile(filepath.Join(destDocument.GetWorkdir(), partFile))
+			content, err := parsePartFile(filepath.Join(destDocument.GetWorkdir(), partFile), files)
 			if err != nil {
 				return nil, nil, errors.Wrapf(errors.ErrParse, err, "failed to load destination part %s", partFile)
 			}
@@ -954,12 +1019,10 @@ func updateComponentInSection(componentsSection map[string]interface{}, comp *Ve
 	return nil
 }
 
-// loadPartFile loads a part file and returns its YAML content.
-func (s *Service) loadPartFile(filePath string) (map[string]interface{}, error) {
-	// Read the file
-	data, err := os.ReadFile(filePath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read part file %s: %w", filePath, err)
+func parsePartFile(filePath string, files map[string][]byte) (map[string]interface{}, error) {
+	data, ok := files[filePath]
+	if !ok {
+		return nil, fmt.Errorf("part file %s wasn't read when the destination was compared", filePath)
 	}
 
 	// Parse YAML
