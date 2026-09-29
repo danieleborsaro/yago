@@ -62,11 +62,7 @@ func addCommonFlags(cmd *cobra.Command, flags *commonFlags, requireDesiredstate 
 	cmd.Flags().StringVar(&flags.terraformSource, "terraform-source", "", "Alias of --sourcecode-repo-workdir")
 	cmd.Flags().StringVarP(&flags.configurationRoot, "configuration-root", "c", "", "Terraform configuration file, if not provided it will be cloned as per desiredstate")
 	cmd.Flags().StringVar(&flags.configRepoWorkdir, "configuration-repo-workdir", "", "Configuration repository working directory (used when configuration is cloned from desiredstate)")
-	environmentDefault := flags.environment
-	if environmentDefault == "" {
-		environmentDefault = "all"
-	}
-	cmd.Flags().StringVarP(&flags.environment, "environment", "e", environmentDefault, "Environment to deploy")
+	cmd.Flags().StringVarP(&flags.environment, "environment", "e", flags.environment, "Environment to deploy")
 
 	if requireDesiredstate {
 		cmd.MarkFlagRequired("desiredstate-root")
@@ -427,6 +423,33 @@ func runAssemble(flags *commonFlags) error {
 	return nil
 }
 
+// the python tool's plan names, so its pipelines and yago hand plans to each other
+const (
+	provisionPlanName = "gitops.tf-provision.tfplan"
+	destroyPlanName   = "gitops.tf-destroy.tfplan"
+)
+
+// provision, destroy and costs all find their plan here, the secret sidecar is always planSecretManifest of
+// the path returned, which is absolute so terraform and infracost read the same file whatever their working directory
+func findSavedPlan(codeDir string, destroy bool) (string, error) {
+	kind, candidates := "plan", []string{provisionPlanName, "tfplan", filepath.Join(".gitops", "tfplan")}
+	if destroy {
+		kind, candidates = "destroy plan", []string{destroyPlanName, "tfplan-destroy", filepath.Join(".gitops", "tfplan-destroy")}
+	}
+	for _, name := range candidates {
+		path, err := filepath.Abs(filepath.Join(codeDir, name))
+		if err != nil {
+			return "", err
+		}
+		if _, err := os.Stat(path); err == nil {
+			return path, nil
+		} else if !os.IsNotExist(err) {
+			return "", err
+		}
+	}
+	return "", fmt.Errorf("%s file not found in %s, looked for %s", kind, codeDir, strings.Join(candidates, ", "))
+}
+
 func newTerraformCommandService(flags *commonFlags, codeDir string) *Service {
 	service := NewService(codeDir, false)
 	service.SetAWSProfile(flags.awsProfile)
@@ -435,6 +458,9 @@ func newTerraformCommandService(flags *commonFlags, codeDir string) *Service {
 }
 
 func prepareTerraformAssembledInputs(flags *commonFlags) (*TerraformAssembleResponse, error) {
+	if err := validateAssembleEnvironment(flags.environment); err != nil {
+		return nil, err
+	}
 	service := NewService(".", false)
 	resp, err := service.AssembleTerraform(TerraformAssembleRequest{
 		DesiredStateFile:  flags.desiredstateRoot,
@@ -725,9 +751,9 @@ func runPlan(flags *commonFlags, isPlanForDestroy, isInit, isReset, isGetProvide
 	logging.Info("")
 
 	// Run terraform plan
-	planFile := "tfplan"
+	planFile := provisionPlanName
 	if isPlanForDestroy {
-		planFile = "tfplan-destroy"
+		planFile = destroyPlanName
 	}
 
 	planReq := PlanRequest{
@@ -770,49 +796,48 @@ func runProvision(flags *commonFlags, isDryRun bool) error {
 		"AWS_REGION":  flags.awsRegion,
 	}
 
-	// Create parser with environment variables
-	parser := NewParser(flags.environment, envVars)
-	parser.SetConfigurationWorkdir(flags.configRepoWorkdir)
-
-	// Load GitOps files (desiredstate/configuration are optional for provision)
-	err := parser.LoadGitOpsFilesExtended(
-		flags.desiredstateRoot,
-		flags.awsRegion,
-		flags.configurationRoot,
-		flags.terraformSource,
-	)
-	if err != nil {
-		return fmt.Errorf("failed to load GitOps files: %w", err)
-	}
-
-	// Determine code directory
+	// the desired state is only needed to find the source code, -s on its own is enough
 	codeDir := flags.terraformSource
-	if parser.IsClonedSourceCode() {
-		codeDir = parser.GetSourceCodeDir()
+	if flags.desiredstateRoot != "" {
+		if err := validateAssembleEnvironment(flags.environment); err != nil {
+			return err
+		}
+		parser := NewParser(flags.environment, envVars)
+		parser.SetConfigurationWorkdir(flags.configRepoWorkdir)
+
+		err := parser.LoadGitOpsFilesExtended(
+			flags.desiredstateRoot,
+			flags.awsRegion,
+			flags.configurationRoot,
+			flags.terraformSource,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to load GitOps files: %w", err)
+		}
+		if parser.IsClonedSourceCode() {
+			codeDir = parser.GetSourceCodeDir()
+		}
 	}
 	if codeDir == "" {
-		return fmt.Errorf("terraform source directory not specified and could not be determined from desired state")
+		return fmt.Errorf("terraform source directory not specified (use -s, or -d to resolve it from the desired state)")
 	}
 
 	// Create service
 	service := newTerraformCommandService(flags, codeDir)
+	if isDryRun {
+		service.SetDryRun(true)
+	}
 
 	// Check terraform version
-	err = service.CheckDependencies()
+	err := service.CheckDependencies()
 	if err != nil {
 		return fmt.Errorf("terraform dependency check failed: %w", err)
 	}
 	logging.Info("")
 
-	// Find plan file (default: tfplan)
-	planFile := "tfplan"
-	planPath := fmt.Sprintf("%s/%s", codeDir, planFile)
-	if _, err := os.Stat(planPath); os.IsNotExist(err) {
-		// Try .gitops/tfplan
-		planPath = fmt.Sprintf("%s/.gitops/%s", codeDir, planFile)
-		if _, err := os.Stat(planPath); os.IsNotExist(err) {
-			return fmt.Errorf("plan file not found: %s", planPath)
-		}
+	planPath, err := findSavedPlan(codeDir, false)
+	if err != nil {
+		return err
 	}
 	logging.Info("Using plan file: '%s'", planPath)
 
@@ -864,6 +889,9 @@ func runDestroyWithPlan(flags *commonFlags, isDryRun bool) error {
 
 	// Create service
 	service := newTerraformCommandService(flags, codeDir)
+	if isDryRun {
+		service.SetDryRun(true)
+	}
 
 	// Check terraform version
 	err := service.CheckDependencies()
@@ -872,15 +900,9 @@ func runDestroyWithPlan(flags *commonFlags, isDryRun bool) error {
 	}
 	logging.Info("")
 
-	// Find destroy plan file (default: tfplan-destroy)
-	planFile := "tfplan-destroy"
-	planPath := fmt.Sprintf("%s/%s", codeDir, planFile)
-	if _, err := os.Stat(planPath); os.IsNotExist(err) {
-		// Try .gitops/tfplan-destroy
-		planPath = fmt.Sprintf("%s/.gitops/%s", codeDir, planFile)
-		if _, err := os.Stat(planPath); os.IsNotExist(err) {
-			return fmt.Errorf("destroy plan file not found: %s", planPath)
-		}
+	planPath, err := findSavedPlan(codeDir, true)
+	if err != nil {
+		return err
 	}
 	logging.Info("Using destroy plan file: '%s'", planPath)
 
@@ -932,6 +954,9 @@ func runDestroyWithoutPlan(flags *commonFlags, isAutoApprove, isInit, isReset, i
 
 	// Create service
 	service := newTerraformCommandService(flags, codeDir)
+	if isDryRun {
+		service.SetDryRun(true)
+	}
 
 	// Check terraform version
 	err = service.CheckDependencies()
@@ -1266,6 +1291,7 @@ func runGraph(flags *commonFlags, graphType string, isInit, isReset, isGetModule
 		logging.Info("[Dry-Run] Would execute: terraform %s | dot -Tsvg -o '%s'", strings.Join(graphArgs, " "), svgFile)
 		logging.Info("[Dry-Run] Working directory: %s", codeDir)
 	} else {
+		logging.Info("Executing: terraform %s | dot -Tsvg -o '%s'", strings.Join(graphArgs, " "), svgFile)
 		// Run terraform graph
 		tfCmd := exec.Command("terraform", graphArgs...)
 		tfCmd.Dir = codeDir
@@ -1378,9 +1404,6 @@ func runImport(flags *commonFlags, tfResourceId, awsResourceId string, isUseLoca
 	logging.Info("TF resource ID:  '%s'", tfResourceId)
 	logging.Info("AWS resource ID: '%s'", awsResourceId)
 	logging.Spaces()
-
-	// argTerraformResourceId = argTerraformResourceId.replace("|", "\\|")
-	tfResourceId = strings.ReplaceAll(tfResourceId, "|", "\\|")
 
 	logging.Info("Loading GitOps files...")
 	assembleResp, err := prepareTerraformAssembledInputs(flags)
@@ -1498,13 +1521,15 @@ func runCosts(flags *commonFlags, isUsePlanFile bool) error {
 		return fmt.Errorf("terraform source directory is required (use -s flag)")
 	}
 
-	// Default plan file name
-	planFile := filepath.Join(codeDir, "gitops.tf-provision.tfplan")
+	var planFile, dsPath, cfgPath string
 
-	var dsPath, cfgPath string
-
-	// If not using plan file, load and assemble GitOps files
-	if !isUsePlanFile {
+	if isUsePlanFile {
+		var err error
+		if planFile, err = findSavedPlan(codeDir, false); err != nil {
+			return err
+		}
+		logging.Info("Using plan file: '%s'", planFile)
+	} else {
 		logging.Info("Loading GitOps files...")
 		assembleResp, err := prepareTerraformAssembledInputs(flags)
 		if err != nil {
