@@ -62,11 +62,7 @@ func addCommonFlags(cmd *cobra.Command, flags *commonFlags, requireDesiredstate 
 	cmd.Flags().StringVar(&flags.terraformSource, "terraform-source", "", "Alias of --sourcecode-repo-workdir")
 	cmd.Flags().StringVarP(&flags.configurationRoot, "configuration-root", "c", "", "Terraform configuration file, if not provided it will be cloned as per desiredstate")
 	cmd.Flags().StringVar(&flags.configRepoWorkdir, "configuration-repo-workdir", "", "Configuration repository working directory (used when configuration is cloned from desiredstate)")
-	environmentDefault := flags.environment
-	if environmentDefault == "" {
-		environmentDefault = "all"
-	}
-	cmd.Flags().StringVarP(&flags.environment, "environment", "e", environmentDefault, "Environment to deploy")
+	cmd.Flags().StringVarP(&flags.environment, "environment", "e", flags.environment, "Environment to deploy")
 
 	if requireDesiredstate {
 		cmd.MarkFlagRequired("desiredstate-root")
@@ -462,6 +458,9 @@ func newTerraformCommandService(flags *commonFlags, codeDir string) *Service {
 }
 
 func prepareTerraformAssembledInputs(flags *commonFlags) (*TerraformAssembleResponse, error) {
+	if err := validateAssembleEnvironment(flags.environment); err != nil {
+		return nil, err
+	}
 	service := NewService(".", false)
 	resp, err := service.AssembleTerraform(TerraformAssembleRequest{
 		DesiredStateFile:  flags.desiredstateRoot,
@@ -800,6 +799,9 @@ func runProvision(flags *commonFlags, isDryRun bool) error {
 	// the desired state is only needed to find the source code, -s on its own is enough
 	codeDir := flags.terraformSource
 	if flags.desiredstateRoot != "" {
+		if err := validateAssembleEnvironment(flags.environment); err != nil {
+			return err
+		}
 		parser := NewParser(flags.environment, envVars)
 		parser.SetConfigurationWorkdir(flags.configRepoWorkdir)
 
