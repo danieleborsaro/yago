@@ -333,7 +333,7 @@ func CloneBranch(url, path, branch string, force bool, config *RepoConfig) (*Rep
 			// Ensure we're on the right branch
 			currentBranch, _ := repo.GetCurrentBranch()
 			if currentBranch != branch {
-				if err := repo.CheckoutBranch(branch); err != nil {
+				if err := repo.CheckoutRef(branch); err != nil {
 					return nil, errors.Wrapf(errors.ErrFail, err, "failed to checkout cached branch %s", branch)
 				}
 			}
@@ -507,29 +507,47 @@ func (r *Repository) GetCurrentCommitShort() (string, error) {
 	return hash, nil
 }
 
-// CheckoutBranch checks out a branch
-func (r *Repository) CheckoutBranch(branch string) error {
-	r.config.Logger.Info("Checking out branch: %s", branch)
+// CheckoutRef takes a branch, a branch only on origin, a tag or a commit, tags and commits leave HEAD detached
+func (r *Repository) CheckoutRef(ref string) error {
+	r.config.Logger.Info("Checking out ref: %s", ref)
 
-	var checkoutErr error
 	err := withSafeDirectoryRetry(r.path, r.config.Logger, func() error {
 		workTree, err := r.repo.Worktree()
 		if err != nil {
 			return errors.Wrapf(errors.ErrFail, err, "failed to get worktree")
 		}
 
-		checkoutErr = workTree.Checkout(&git.CheckoutOptions{
-			Branch: plumbing.NewBranchReferenceName(branch),
-		})
-		return checkoutErr
+		opts, err := r.checkoutOptions(ref)
+		if err != nil {
+			return err
+		}
+		return workTree.Checkout(opts)
 	})
 
 	if err != nil {
-		return errors.Wrapf(errors.ErrFail, err, "failed to checkout branch %s", branch)
+		return errors.Wrapf(errors.ErrFail, err, "failed to checkout ref %s", ref)
 	}
 
-	r.config.Logger.Info("Successfully checked out branch: %s", branch)
+	r.config.Logger.Info("Successfully checked out ref: %s", ref)
 	return nil
+}
+
+func (r *Repository) checkoutOptions(ref string) (*git.CheckoutOptions, error) {
+	local := plumbing.NewBranchReferenceName(ref)
+	if _, err := r.repo.Reference(local, true); err == nil {
+		return &git.CheckoutOptions{Branch: local}, nil
+	}
+
+	remote := plumbing.NewRemoteReferenceName("origin", ref)
+	if remoteRef, err := r.repo.Reference(remote, true); err == nil {
+		return &git.CheckoutOptions{Branch: local, Hash: remoteRef.Hash(), Create: true}, nil
+	}
+
+	hash, err := r.repo.ResolveRevision(plumbing.Revision(ref))
+	if err != nil {
+		return nil, errors.Wrapf(errors.ErrFail, err, "ref %s is not a branch, tag or commit", ref)
+	}
+	return &git.CheckoutOptions{Hash: *hash}, nil
 }
 
 // CreateBranch creates a new branch

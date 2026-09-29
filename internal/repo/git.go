@@ -347,7 +347,7 @@ func (r *Repo) Checkout() error {
 	}
 
 	// Perform checkout
-	err := r.repository.CheckoutBranch(r.Ref)
+	err := r.repository.CheckoutRef(r.Ref)
 	if err != nil {
 		r.config.Logger.Error("Failed to checkout ref %s: %v", r.Ref, err)
 		return err
