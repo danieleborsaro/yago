@@ -501,6 +501,14 @@ func (s *Service) PromoteDesiredState(req PromoteRequest) (response *PromoteResp
 			logging.Info("[Dry-Run] %d component(s) would remain unchanged", comparisonResult.ComponentsUnchanged)
 		}
 
+		if req.IsRemoveMissing {
+			for _, change := range comparisonResult.ComponentChanges {
+				if change.IsRemoved {
+					logging.Info("[Dry-Run] Would remove %s (was %s)", change.PartID, change.DestVersion)
+				}
+			}
+		}
+
 		logging.Spaces()
 		logging.Info("[Dry-Run] Would write updated content to: %s", req.DestinationFile)
 		logging.Info("[Dry-Run] No files were modified")
@@ -614,7 +622,28 @@ func (s *Service) PromoteDesiredState(req PromoteRequest) (response *PromoteResp
 			len(ambiguous), strings.Join(ambiguous, ", "))
 	}
 
-	if componentsUpdated == 0 {
+	removals := make(map[string][]*VersionedComponent)
+	componentsRemoved := 0
+	if req.IsRemoveMissing {
+		inSource := make(map[string]bool)
+		for _, comp := range sourceParser.GetManager().GetAllComponents() {
+			inSource[comp.PartID] = true
+		}
+		for _, destComp := range componentsInOrder(destManager) {
+			if inSource[destComp.PartID] {
+				continue
+			}
+			if req.SelectedPartIDs != nil && !req.SelectedPartIDs[destComp.PartID] {
+				continue
+			}
+			logging.Info("Removing component: %s (was %s)", destComp.PartID, destComp.Version)
+			removals[destComp.PartFile] = append(removals[destComp.PartFile], destComp)
+			componentsRemoved++
+			modifiedPartFiles[destComp.PartFile] = true
+		}
+	}
+
+	if componentsUpdated == 0 && componentsRemoved == 0 {
 		logging.Info("No components need updating")
 		logging.Spaces()
 
@@ -633,7 +662,7 @@ func (s *Service) PromoteDesiredState(req PromoteRequest) (response *PromoteResp
 		}
 
 		logging.Info("Updating %s", partFile)
-		if err := applyComponentChanges(data, destManager.GetComponentsByPartFile(partFile)); err != nil {
+		if err := applyComponentChanges(data, destManager.GetComponentsByPartFile(partFile), removals[partFile]); err != nil {
 			return response, errors.Wrapf(errors.ErrFail, err, "failed to update components in %s", partFile)
 		}
 		content, err := marshalDesiredState(data)
@@ -647,7 +676,7 @@ func (s *Service) PromoteDesiredState(req PromoteRequest) (response *PromoteResp
 
 	logging.Spaces()
 	logging.Info("Promotion completed successfully")
-	logging.Info("Updated %d component(s) across %d file(s)", componentsUpdated, len(modifiedPartFiles))
+	logging.Info("Updated %d and removed %d component(s) across %d file(s)", componentsUpdated, componentsRemoved, len(modifiedPartFiles))
 
 	response.FilesModified = true
 	response.Success = true
@@ -699,7 +728,7 @@ func sortedKeys(set map[string]bool) []string {
 	return keys
 }
 
-func applyComponentChanges(data map[string]interface{}, updates []*VersionedComponent) error {
+func applyComponentChanges(data map[string]interface{}, updates, removals []*VersionedComponent) error {
 	var componentsSection map[string]interface{}
 	if desiredstate, ok := data["desiredstate"].(map[string]interface{}); ok {
 		if content, ok := desiredstate["content"].(map[string]interface{}); ok {
@@ -715,6 +744,40 @@ func applyComponentChanges(data map[string]interface{}, updates []*VersionedComp
 	for _, comp := range updates {
 		if err := updateComponentInSection(componentsSection, comp); err != nil {
 			return fmt.Errorf("failed to update component %s: %w", comp.PartID, err)
+		}
+	}
+	for _, comp := range removals {
+		if err := removeComponentFromSection(componentsSection, comp.PartID); err != nil {
+			return fmt.Errorf("failed to remove component %s: %w", comp.PartID, err)
+		}
+	}
+	return nil
+}
+
+// a PartID is the key path under components, the leaf goes and so does any parent it leaves empty,
+// the sourcecode and artifacts sections always stay
+func removeComponentFromSection(componentsSection map[string]interface{}, partID string) error {
+	keys := strings.Split(partID, ".")
+	if len(keys) < 2 {
+		return fmt.Errorf("invalid PartID format: %s", partID)
+	}
+
+	maps := []map[string]interface{}{componentsSection}
+	for _, key := range keys[:len(keys)-1] {
+		next, ok := maps[len(maps)-1][key].(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("%s not found", partID)
+		}
+		maps = append(maps, next)
+	}
+	if _, ok := maps[len(maps)-1][keys[len(keys)-1]]; !ok {
+		return fmt.Errorf("%s not found", partID)
+	}
+
+	for i := len(keys) - 1; i >= 1; i-- {
+		delete(maps[i], keys[i])
+		if len(maps[i]) > 0 {
+			break
 		}
 	}
 	return nil
