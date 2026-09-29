@@ -261,7 +261,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.PUSH_PAT }}
 
       - name: Download coverage artifact
         uses: actions/download-artifact@v4
@@ -291,18 +290,22 @@ jobs:
           fi
 
       - name: Commit coverage history
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request'PAT
         env:
           GPG_PRIVATE_KEY: ${{ secrets.PUSH_GPG_PRIVATE_KEY }}
           GPG_KEY_ID: ${{ secrets.PUSH_GPG_KEY_ID }}
+          COVERAGE_BRANCH: "coverage-history" # Your target branch name
         run: |
-          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
-
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
           git config --local user.signingkey "$GPG_KEY_ID"
           git config --local commit.gpgsign true
 
+          # Fetch remote branches and switch to the target branch (create it if missing)
+          git fetch origin "$COVERAGE_BRANCH" || true
+          git checkout -B "$COVERAGE_BRANCH" origin/"$COVERAGE_BRANCH" 2>/dev/null || git checkout --orphan "$COVERAGE_BRANCH"
+
+          # Stage the coverage file (it carries over when you switch branches)
           git add .coverage-history/coverage.csv
 
           if git diff --cached --quiet; then
@@ -311,7 +314,7 @@ jobs:
           fi
 
           git commit -m "Update coverage history [skip ci]"
-          git push origin "HEAD:${GITHUB_REF_NAME}"
+          git push origin "$COVERAGE_BRANCH"
 
   # ===========================================================================
   # COVERAGE BADGE GENERATION
