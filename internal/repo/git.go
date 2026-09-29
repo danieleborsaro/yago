@@ -347,7 +347,7 @@ func (r *Repo) Checkout() error {
 	}
 
 	// Perform checkout
-	err := r.repository.CheckoutBranch(r.Ref)
+	err := r.repository.CheckoutRef(r.Ref)
 	if err != nil {
 		r.config.Logger.Error("Failed to checkout ref %s: %v", r.Ref, err)
 		return err
@@ -612,10 +612,10 @@ func (r *Repo) setCache() {
 
 // updateProperties updates git properties for current checked out workdir
 // This method is defensive - it logs warnings for individual failures rather than aborting
-func (r *Repo) updateProperties() error {
+func (r *Repo) updateProperties() {
 	if !r.isGitRepo || r.repository == nil {
 		r.config.Logger.Debug("Not a git repository, skipping property update")
-		return nil
+		return
 	}
 
 	// Get URL - log warning if it fails but continue
@@ -634,7 +634,7 @@ func (r *Repo) updateProperties() error {
 	if r.IsBare {
 		r.config.Logger.Debug("Bare repo, not loading branch/commit properties")
 		r.config.Logger.Debug("Repo properties: url=%s, bare=%v, mirror=%v", r.URL, r.IsBare, r.IsMirror)
-		return nil
+		return
 	}
 
 	// Get current branch - handle detached HEAD state gracefully
@@ -671,7 +671,6 @@ func (r *Repo) updateProperties() error {
 
 	r.config.Logger.Debug("Repo properties: url=%s, ref=%s, branch=%s, commit=%s, bare=%v, mirror=%v",
 		r.URL, r.Ref, r.Branch, r.Commit, r.IsBare, r.IsMirror)
-	return nil
 }
 
 // InitFromGitConfig initializes repository info from git config
