@@ -757,15 +757,10 @@ func updateComponentInSection(componentsSection map[string]interface{}, comp *Ve
 	// Update the version based on component type
 	switch comp.Type {
 	case ComponentTypeSourcecode:
-		// For sourcecode: update "tag" and/or "branch" field
-		if comp.Tag != "" {
-			componentData["tag"] = comp.Tag
-			logging.Debug("Updated %s tag to %s", comp.PartID, comp.Tag)
-		}
-		if comp.Branch != "" {
-			componentData["branch"] = comp.Branch
-			logging.Debug("Updated %s branch to %s", comp.PartID, comp.Branch)
-		}
+		// empty values are written too, otherwise an old tag survives next to the new branch
+		componentData["tag"] = comp.Tag
+		componentData["branch"] = comp.Branch
+		logging.Debug("Updated %s to branch %q tag %q", comp.PartID, comp.Branch, comp.Tag)
 
 	case ComponentTypeDocker, ComponentTypeS3, ComponentTypeAMI:
 		// For artifacts: navigate to type.region and update version field
