@@ -423,6 +423,59 @@ func TestPromote_SourcecodeRefIsReplaced_BehavioralBDD(t *testing.T) {
 	}
 }
 
+func TestPromote_RemoveMissing_BehavioralBDD(t *testing.T) {
+	contract := PromoteBehavioralContract{
+		Behavior:        "--remove-missing deletes destination components the source no longer has",
+		CurrentImpl:     "PromoteDesiredState collects destination only components and removeComponentFromSection deletes them",
+		ExpectedOutcome: "The component is gone after a rollback, and without --rollback the promotion is refused",
+		Rationale:       "The flag used to warn that components would be deleted and then never delete them",
+	}
+	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
+
+	tests := []struct {
+		name        string
+		rollback    bool
+		selected    map[string]bool
+		wantErr     bool
+		wantRemoved bool
+	}{
+		{name: "rollback removes it", rollback: true, wantRemoved: true},
+		{name: "without rollback it's refused", wantErr: true},
+		{name: "not selected it stays", rollback: true, selected: map[string]bool{"artifacts.api.docker.eu-west-1": true}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Given: the destination has a worker the source dropped
+			f := newPromoteFixture(t)
+			src := f.singleFile("src", map[string]string{"api": "2.1.0"})
+			dst := f.singleFile("dst", map[string]string{"api": "2.0.0", "worker": "3.0.0"})
+			req := promoteRequest(src, dst)
+			req.IsRemoveMissing = true
+			req.IsRollback = tt.rollback
+			req.SelectedPartIDs = tt.selected
+
+			// When: the source is promoted with --remove-missing
+			_, err := NewService(".", false).PromoteDesiredState(req)
+
+			// Then: worker is removed only when that was allowed and selected
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("removal without --rollback succeeded, want it refused")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("PromoteDesiredState: %v", err)
+			}
+			got := f.read(dst)
+			assertTag(t, got, "api", "2.1.0")
+			if removed := !strings.Contains(got, "example/worker"); removed != tt.wantRemoved {
+				t.Errorf("worker removed = %v, want %v:\n%s", removed, tt.wantRemoved, got)
+			}
+		})
+	}
+}
+
 func TestPromote_ComponentDefinedTwiceIsRefused_BehavioralBDD(t *testing.T) {
 	contract := PromoteBehavioralContract{
 		Behavior:        "Refuse to promote a component the destination defines in more than one file",
