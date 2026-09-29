@@ -813,3 +813,109 @@ func TestPromote_RefusesUncommittedChanges_BehavioralBDD(t *testing.T) {
 		t.Errorf("changes were stashed: %s", stashes)
 	}
 }
+
+// makes a change the first time the promotion reads an answer, which is after the comparison and before
+// anything is written
+type changeBeforeAnswering struct {
+	change  func()
+	answers io.Reader
+}
+
+func (r *changeBeforeAnswering) Read(p []byte) (int, error) {
+	if r.change != nil {
+		r.change()
+		r.change = nil
+	}
+	return r.answers.Read(p)
+}
+
+func TestInteractivePromotion_DestinationChangedAfterReview_BehavioralBDD(t *testing.T) {
+	contract := PromoteBehavioralContract{
+		Behavior:        "Interactive promote refuses to write when the destination changed between the comparison and the confirmation",
+		CurrentImpl:     "preparePromotion snapshots the destination's files and checkout, applyPromotion writes on top of the snapshot once it's checked the snapshot still holds",
+		ExpectedOutcome: "An error saying what changed, with the destination left the way the change left it",
+		Rationale:       "Parts were read again after the prompts, so an api moved to 3.0.0 meanwhile was set back to the reviewed 2.1.0, a downgrade nobody approved",
+	}
+	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
+
+	// dev has api 2.1.0 and prod 2.0.0, staging has 1.0.0, and prod is checked out
+	threeBranches := func(f *promoteFixture) (PromoteRequest, string) {
+		root, part := f.sameFilesOnTwoBranches("prod")
+		f.git("checkout", "-q", "-b", "staging", "prod")
+		f.write(part, "---\ndesiredstate:\n"+artifactsYAML(map[string]string{"api": "1.0.0"}))
+		f.git("commit", "-q", "-am", "api 1.0.0")
+		f.git("checkout", "-q", "prod")
+		req := promoteRequest(root, root)
+		req.SourceBranch, req.TargetBranch = "dev", "prod"
+		return req, part
+	}
+
+	tests := []struct {
+		name    string
+		given   func(f *promoteFixture) (req PromoteRequest, watched string)
+		change  func(f *promoteFixture, watched string)
+		wantErr string
+		wantAPI string
+	}{
+		{
+			name: "a part edited",
+			given: func(f *promoteFixture) (PromoteRequest, string) {
+				src := f.singleFile("src", map[string]string{"api": "2.1.0"})
+				root, part := f.withPart("dst", map[string]string{"api": "2.0.0"})
+				return promoteRequest(src, root), part
+			},
+			change: func(f *promoteFixture, part string) {
+				f.write(part, "---\ndesiredstate:\n"+artifactsYAML(map[string]string{"api": "3.0.0"}))
+			},
+			wantErr: "changed after it was compared",
+			wantAPI: "3.0.0",
+		},
+		{
+			name: "a single file destination edited",
+			given: func(f *promoteFixture) (PromoteRequest, string) {
+				src := f.singleFile("src", map[string]string{"api": "2.1.0"})
+				dst := f.singleFile("dst", map[string]string{"api": "2.0.0"})
+				return promoteRequest(src, dst), dst
+			},
+			change: func(f *promoteFixture, _ string) {
+				f.singleFile("dst", map[string]string{"api": "3.0.0"})
+			},
+			wantErr: "changed after it was compared",
+			wantAPI: "3.0.0",
+		},
+		{
+			name:    "another branch checked out",
+			given:   threeBranches,
+			change:  func(f *promoteFixture, _ string) { f.git("checkout", "-q", "staging") },
+			wantErr: "is on staging",
+			wantAPI: "1.0.0",
+		},
+		{
+			name:    "a new commit on the target branch",
+			given:   threeBranches,
+			change:  func(f *promoteFixture, _ string) { f.git("commit", "-q", "--allow-empty", "-m", "meanwhile") },
+			wantErr: "run the promotion again",
+			wantAPI: "2.0.0",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Given: api reviewed as an upgrade from 2.0.0 to 2.1.0
+			f := newPromoteFixture(t)
+			req, watched := tt.given(f)
+			answers := &changeBeforeAnswering{
+				change:  func() { tt.change(f, watched) },
+				answers: strings.NewReader("y\na\ny\n"),
+			}
+
+			// When: the destination changes while the prompts are up, then everything is confirmed
+			err := runInteractivePromotion(NewService(".", false), req, answers, io.Discard)
+
+			// Then: it refuses and the change is still there
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("error = %v, want one containing %q", err, tt.wantErr)
+			}
+			assertTag(t, f.read(watched), "api", tt.wantAPI)
+		})
+	}
+}
