@@ -662,6 +662,7 @@ func (s *Service) PromoteDesiredState(req PromoteRequest) (response *PromoteResp
 	logging.Spaces()
 	logging.Info("Updating %d modified part file(s)...", len(modifiedPartFiles))
 
+	var writes []pendingWrite
 	for _, partFile := range sortedKeys(modifiedPartFiles) {
 		data, path := destParts[partFile], filepath.Join(destDocument.GetWorkdir(), partFile)
 		if partFile == req.DestinationFile {
@@ -676,9 +677,11 @@ func (s *Service) PromoteDesiredState(req PromoteRequest) (response *PromoteResp
 		if err != nil {
 			return response, errors.Wrapf(errors.ErrFail, err, "failed to render %s", partFile)
 		}
-		if err := os.WriteFile(path, content, 0o644); err != nil {
-			return response, errors.Wrapf(errors.ErrFail, err, "failed to save %s", partFile)
-		}
+		writes = append(writes, pendingWrite{path: path, content: content})
+	}
+
+	if err := writeAllOrNothing(writes); err != nil {
+		return response, errors.Wrapf(errors.ErrFail, err, "failed to save the destination")
 	}
 
 	logging.Spaces()
@@ -785,6 +788,67 @@ func removeComponentFromSection(componentsSection map[string]interface{}, partID
 		delete(maps[i], keys[i])
 		if len(maps[i]) > 0 {
 			break
+		}
+	}
+	return nil
+}
+
+type pendingWrite struct {
+	path    string
+	content []byte
+}
+
+// every file goes to a temp file next to it first, so a failed write leaves the destination untouched,
+// only a failed rename part way through can leave it half written
+func writeAllOrNothing(writes []pendingWrite) error {
+	// writing to a symlink always went through to its target, so the target is what gets replaced and
+	// the link stays, the replacement also keeps the target's permissions so a 0600 file stays private
+	targets := make([]string, len(writes))
+	modes := make([]os.FileMode, len(writes))
+	for i, w := range writes {
+		target, err := filepath.EvalSymlinks(w.path)
+		if err != nil {
+			return fmt.Errorf("resolving %s: %w", w.path, err)
+		}
+		info, err := os.Stat(target)
+		if err != nil {
+			return fmt.Errorf("reading %s: %w", w.path, err)
+		}
+		targets[i], modes[i] = target, info.Mode().Perm()
+	}
+
+	temps := make([]string, 0, len(writes))
+	cleanup := func() {
+		for _, temp := range temps {
+			_ = os.Remove(temp)
+		}
+	}
+
+	for i, w := range writes {
+		f, err := os.CreateTemp(filepath.Dir(targets[i]), "."+filepath.Base(targets[i])+".tmp-")
+		if err != nil {
+			cleanup()
+			return fmt.Errorf("writing %s: %w", w.path, err)
+		}
+		temps = append(temps, f.Name())
+		_, err = f.Write(w.content)
+		if closeErr := f.Close(); err == nil {
+			err = closeErr
+		}
+		if err == nil {
+			err = os.Chmod(f.Name(), modes[i])
+		}
+		if err != nil {
+			cleanup()
+			return fmt.Errorf("writing %s: %w", w.path, err)
+		}
+	}
+
+	for i, w := range writes {
+		if err := os.Rename(temps[i], targets[i]); err != nil {
+			temps = temps[i:]
+			cleanup()
+			return fmt.Errorf("replacing %s, files before it were already replaced: %w", w.path, err)
 		}
 	}
 	return nil
