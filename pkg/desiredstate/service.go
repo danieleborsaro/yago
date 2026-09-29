@@ -145,6 +145,13 @@ func (s *Service) CompareDesiredStates(sourceFile, destFile, awsProfile, awsRegi
 		return result, errors.Wrapf(errors.ErrParse, err, "failed to parse source components")
 	}
 	sourceComponents := sourceParser.GetManager().GetAllComponents()
+	// 2.0.0 keeps components straight under desiredstate, which the parser doesn't read yet, and an
+	// empty result used to look like a successful promotion with nothing to do
+	if len(sourceComponents) == 0 {
+		return result, errors.Newf(errors.ErrParse,
+			"no components found under desiredstate.content.components in %s, compare and promote only support that layout for now",
+			sourceFile)
+	}
 
 	// Load and parse destination desiredstate
 	logging.Debug("Parsing destination desiredstate components...")
