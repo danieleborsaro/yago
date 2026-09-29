@@ -822,6 +822,9 @@ func runProvision(flags *commonFlags, isDryRun bool) error {
 
 	// Create service
 	service := newTerraformCommandService(flags, codeDir)
+	if isDryRun {
+		service.SetDryRun(true)
+	}
 
 	// Check terraform version
 	err := service.CheckDependencies()
@@ -884,6 +887,9 @@ func runDestroyWithPlan(flags *commonFlags, isDryRun bool) error {
 
 	// Create service
 	service := newTerraformCommandService(flags, codeDir)
+	if isDryRun {
+		service.SetDryRun(true)
+	}
 
 	// Check terraform version
 	err := service.CheckDependencies()
@@ -946,6 +952,9 @@ func runDestroyWithoutPlan(flags *commonFlags, isAutoApprove, isInit, isReset, i
 
 	// Create service
 	service := newTerraformCommandService(flags, codeDir)
+	if isDryRun {
+		service.SetDryRun(true)
+	}
 
 	// Check terraform version
 	err = service.CheckDependencies()
