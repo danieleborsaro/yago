@@ -1289,6 +1289,7 @@ func runGraph(flags *commonFlags, graphType string, isInit, isReset, isGetModule
 		logging.Info("[Dry-Run] Would execute: terraform %s | dot -Tsvg -o '%s'", strings.Join(graphArgs, " "), svgFile)
 		logging.Info("[Dry-Run] Working directory: %s", codeDir)
 	} else {
+		logging.Info("Executing: terraform %s | dot -Tsvg -o '%s'", strings.Join(graphArgs, " "), svgFile)
 		// Run terraform graph
 		tfCmd := exec.Command("terraform", graphArgs...)
 		tfCmd.Dir = codeDir

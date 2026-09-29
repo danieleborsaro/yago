@@ -275,7 +275,7 @@ type InitResponse struct {
 // Init runs terraform init to initialize the working directory.
 // Supports get, upgrade, reconfigure, migrate-state, lock-providers flags.
 func (s *Service) Init(req InitRequest) (*InitResponse, error) {
-	logging.Debug("Running terraform init in directory: %s", req.WorkingDir)
+	logging.Info("Running terraform init in directory: %s", req.WorkingDir)
 
 	args := []string{"init"}
 
@@ -355,7 +355,7 @@ type PlanResponse struct {
 
 // Plan runs terraform plan to generate an execution plan.
 func (s *Service) Plan(req PlanRequest) (*PlanResponse, error) {
-	logging.Debug("Running terraform plan in directory: %s", req.WorkingDir)
+	logging.Info("Running terraform plan in directory: %s", req.WorkingDir)
 
 	args := []string{"plan"}
 
@@ -445,7 +445,7 @@ type ApplyResponse struct {
 
 // Apply runs terraform apply to apply the planned changes.
 func (s *Service) Apply(req ApplyRequest) (*ApplyResponse, error) {
-	logging.Debug("Running terraform apply in directory: %s", req.WorkingDir)
+	logging.Info("Running terraform apply in directory: %s", req.WorkingDir)
 
 	args := []string{"apply"}
 
@@ -530,7 +530,7 @@ type DestroyResponse struct {
 
 // Destroy runs terraform destroy to destroy all managed infrastructure.
 func (s *Service) Destroy(req DestroyRequest) (*DestroyResponse, error) {
-	logging.Debug("Running terraform destroy in directory: %s", req.WorkingDir)
+	logging.Info("Running terraform destroy in directory: %s", req.WorkingDir)
 
 	args := []string{"destroy"}
 
@@ -599,7 +599,7 @@ type OutputResponse struct {
 
 // Output runs terraform output to retrieve output values.
 func (s *Service) Output(req OutputRequest) (*OutputResponse, error) {
-	logging.Debug("Running terraform output in directory: %s", req.WorkingDir)
+	logging.Info("Running terraform output in directory: %s", req.WorkingDir)
 
 	args := []string{"output"}
 
@@ -642,7 +642,7 @@ type ValidateResponse struct {
 
 // ValidateTerraform runs terraform validate to check configuration syntax.
 func (s *Service) ValidateTerraform(req ValidateRequest) (*ValidateResponse, error) {
-	logging.Debug("Running terraform validate in directory: %s", req.WorkingDir)
+	logging.Info("Running terraform validate in directory: %s", req.WorkingDir)
 
 	args := []string{"validate"}
 
@@ -1101,6 +1101,7 @@ func (s *Service) Costs(req CostsRequest) (*CostsResponse, error) {
 		}, nil
 	}
 
+	logging.Info("Executing: infracost %s", strings.Join(args, " "))
 	cmd := exec.Command("infracost", args...)
 	cmd.Dir = req.WorkingDir
 
@@ -1136,11 +1137,11 @@ func (s *Service) runTerraformCommandWithSecrets(workingDir, manifestPath string
 		return "", nil, errors.Newf(errors.ErrFail, "terraform command not found in PATH. Please install Terraform %s", s.tfVersion)
 	}
 
-	logging.Debug("Using terraform binary: %s", tfPath)
+	logging.Info("Using terraform binary: %s", tfPath)
 
 	// Build command string for logging
 	cmdStr := fmt.Sprintf("terraform %s", strings.Join(args, " "))
-	logging.Debug("Executing: %s", cmdStr)
+	logging.Info("Executing: %s", cmdStr)
 
 	// Handle dry-run mode - just log the command without executing
 	if s.isDryRun {
