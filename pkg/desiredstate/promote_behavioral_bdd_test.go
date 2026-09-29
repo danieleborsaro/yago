@@ -476,6 +476,50 @@ func TestPromote_RemoveMissing_BehavioralBDD(t *testing.T) {
 	}
 }
 
+func TestPromote_FailedWriteChangesNothing_BehavioralBDD(t *testing.T) {
+	contract := PromoteBehavioralContract{
+		Behavior:        "A promotion that can't write every file changes none of them",
+		CurrentImpl:     "writeAllOrNothing writes temp files for every part and only renames once all are written",
+		ExpectedOutcome: "An error, with every destination file as it was",
+		Rationale:       "Files used to be saved one by one, so a failure part way left a half promoted destination",
+	}
+	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
+
+	// Given: a destination split over two parts, the second in a directory that can't be written to
+	f := newPromoteFixture(t)
+	mk := func(name, apiTag, webTag string) (root, apiPart, webPart string) {
+		root = filepath.Join(f.base, name, "desiredstate.yaml")
+		apiPart = filepath.Join(f.base, name, "a", "api.yaml")
+		webPart = filepath.Join(f.base, name, "b", "web.yaml")
+		f.write(root, fmt.Sprintf("---\nschema: 4.2.0\nnamespace: legacy\ndesiredstate:\n  meta:\n    parts:\n      self: %s\n      api: %s\n      web: %s\n",
+			root, apiPart, webPart))
+		f.write(apiPart, "---\ndesiredstate:\n"+artifactsYAML(map[string]string{"api": apiTag}))
+		f.write(webPart, "---\ndesiredstate:\n"+artifactsYAML(map[string]string{"web": webTag}))
+		return root, apiPart, webPart
+	}
+	src, _, _ := mk("src", "2.1.0", "1.5.0")
+	dst, dstAPI, dstWeb := mk("dst", "2.0.0", "1.0.0")
+	apiBefore, webBefore := f.read(dstAPI), f.read(dstWeb)
+	if err := os.Chmod(filepath.Dir(dstWeb), 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(filepath.Dir(dstWeb), 0o755) })
+
+	// When: the source is promoted
+	_, err := NewService(".", false).PromoteDesiredState(promoteRequest(src, dst))
+
+	// Then: it fails and neither part changed
+	if err == nil {
+		t.Fatal("promotion into a read only directory succeeded, want an error")
+	}
+	if got := f.read(dstAPI); got != apiBefore {
+		t.Errorf("api part changed although the promotion failed:\n%s", got)
+	}
+	if got := f.read(dstWeb); got != webBefore {
+		t.Errorf("web part changed although the promotion failed:\n%s", got)
+	}
+}
+
 func TestPromote_UnsupportedLayoutFails_BehavioralBDD(t *testing.T) {
 	contract := PromoteBehavioralContract{
 		Behavior:        "Promote fails when it can't find any components in the source",
@@ -536,5 +580,128 @@ func TestPromote_ComponentDefinedTwiceIsRefused_BehavioralBDD(t *testing.T) {
 	}
 	if f.read(root) != rootBefore || f.read(part) != partBefore {
 		t.Error("destination changed after a refused promotion")
+	}
+}
+
+func TestPromote_KeepsFilePermissions_BehavioralBDD(t *testing.T) {
+	contract := PromoteBehavioralContract{
+		Behavior:        "A promoted file keeps its permissions",
+		CurrentImpl:     "writeAllOrNothing gives each temp file the mode of the file it replaces",
+		ExpectedOutcome: "A 0600 destination is still 0600 after promotion",
+		Rationale:       "Replacing files through temp files used to reset them to 0644 and make private files readable",
+	}
+	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
+
+	// Given: a destination only its owner can read
+	f := newPromoteFixture(t)
+	src := f.singleFile("src", map[string]string{"api": "2.1.0"})
+	dst := f.singleFile("dst", map[string]string{"api": "2.0.0"})
+	if err := os.Chmod(dst, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// When: the source is promoted
+	_, err := NewService(".", false).PromoteDesiredState(promoteRequest(src, dst))
+
+	// Then: it's updated and still private
+	if err != nil {
+		t.Fatalf("PromoteDesiredState: %v", err)
+	}
+	assertTag(t, f.read(dst), "api", "2.1.0")
+	info, err := os.Stat(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode := info.Mode().Perm(); mode != 0o600 {
+		t.Errorf("mode = %v, want 0600", mode)
+	}
+}
+
+func TestPromote_WritesThroughSymlinks_BehavioralBDD(t *testing.T) {
+	contract := PromoteBehavioralContract{
+		Behavior:        "A symlinked destination file stays a symlink and its target gets the new versions",
+		CurrentImpl:     "writeAllOrNothing resolves each path with filepath.EvalSymlinks and replaces the target",
+		ExpectedOutcome: "The link and its text are unchanged, the file it points at is promoted",
+		Rationale:       "Replacing through a temp file used to swap the link for a regular file and leave its target on the old version",
+	}
+	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
+
+	// link makes path a relative symlink to a real file under shared, holding content
+	link := func(f *promoteFixture, path, content string) (target, linkText string) {
+		target = filepath.Join(f.base, "shared", filepath.Base(path))
+		f.write(target, content)
+		linkText, err := filepath.Rel(filepath.Dir(path), target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(linkText, path); err != nil {
+			t.Fatal(err)
+		}
+		return target, linkText
+	}
+
+	tests := []struct {
+		name string
+		// given writes the destination with one symlinked file and returns the root, the link and its target
+		given func(f *promoteFixture) (root, linkPath, target, linkText string)
+		src   func(f *promoteFixture) string
+	}{
+		{
+			name: "symlinked root",
+			given: func(f *promoteFixture) (string, string, string, string) {
+				root := filepath.Join(f.base, "dst.yaml")
+				target, linkText := link(f, root, fmt.Sprintf("---\nschema: 4.2.0\nnamespace: legacy\ndesiredstate:\n  meta:\n    parts:\n      self: %s\n%s",
+					root, artifactsYAML(map[string]string{"api": "2.0.0"})))
+				return root, root, target, linkText
+			},
+			src: func(f *promoteFixture) string {
+				return f.singleFile("src", map[string]string{"api": "2.1.0"})
+			},
+		},
+		{
+			name: "symlinked part",
+			given: func(f *promoteFixture) (string, string, string, string) {
+				root := filepath.Join(f.base, "dst", "desiredstate.yaml")
+				part := filepath.Join(f.base, "dst", "app.yaml")
+				f.write(root, fmt.Sprintf("---\nschema: 4.2.0\nnamespace: legacy\ndesiredstate:\n  meta:\n    parts:\n      self: %s\n      app: %s\n",
+					root, part))
+				target, linkText := link(f, part, "---\ndesiredstate:\n"+artifactsYAML(map[string]string{"api": "2.0.0"}))
+				return root, part, target, linkText
+			},
+			src: func(f *promoteFixture) string {
+				root, _ := f.withPart("src", map[string]string{"api": "2.1.0"})
+				return root
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Given: a destination with one of its files symlinked to a file elsewhere
+			f := newPromoteFixture(t)
+			root, linkPath, target, linkText := tt.given(f)
+			src := tt.src(f)
+
+			// When: the source is promoted
+			_, err := NewService(".", false).PromoteDesiredState(promoteRequest(src, root))
+
+			// Then: the link is untouched and the file it points at has the new version
+			if err != nil {
+				t.Fatalf("PromoteDesiredState: %v", err)
+			}
+			info, err := os.Lstat(linkPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Mode()&os.ModeSymlink == 0 {
+				t.Fatalf("%s was replaced by a regular file", linkPath)
+			}
+			if got, err := os.Readlink(linkPath); err != nil || got != linkText {
+				t.Errorf("link points at %q (%v), want %q", got, err, linkText)
+			}
+			assertTag(t, f.read(target), "api", "2.1.0")
+		})
 	}
 }
