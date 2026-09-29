@@ -705,3 +705,111 @@ func TestPromote_WritesThroughSymlinks_BehavioralBDD(t *testing.T) {
 		})
 	}
 }
+
+// sameFilesOnTwoBranches commits a root and its app part at the same paths on dev and prod, the root is the
+// same on both, the part has api 2.1.0 on dev and 2.0.0 on prod, and start is left checked out
+func (f *promoteFixture) sameFilesOnTwoBranches(start string) (root, part string) {
+	f.t.Helper()
+	root = filepath.Join(f.base, "desiredstate.yaml")
+	part = filepath.Join(f.base, "app.yaml")
+	f.write(root, fmt.Sprintf("---\nschema: 4.2.0\nnamespace: legacy\ndesiredstate:\n  meta:\n    parts:\n      self: %s\n      app: %s\n",
+		root, part))
+	f.git("add", "desiredstate.yaml")
+	f.git("commit", "-q", "-m", "root")
+	for branch, tag := range map[string]string{"dev": "2.1.0", "prod": "2.0.0"} {
+		f.git("checkout", "-q", "-b", branch, "main")
+		f.write(part, "---\ndesiredstate:\n"+artifactsYAML(map[string]string{"api": tag}))
+		f.git("add", "app.yaml")
+		f.git("commit", "-q", "-m", "api "+tag)
+	}
+	f.git("checkout", "-q", start)
+	return root, part
+}
+
+func TestPromote_SamePathOnTwoBranches_BehavioralBDD(t *testing.T) {
+	contract := PromoteBehavioralContract{
+		Behavior:        "Promote from one branch to another when the desired state has the same path on both",
+		CurrentImpl:     "preparePromotion checks out the source branch, loads the source with its parts, then checks out the target",
+		ExpectedOutcome: "The target branch is checked out and its part gets the source branch's version, the root is untouched",
+		Rationale:       "The branch flags used to be ignored, so the file was compared with itself and nothing was promoted",
+	}
+	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
+
+	tests := []struct {
+		name        string
+		start       string
+		interactive bool
+	}{
+		{name: "starting on the target branch", start: "prod"},
+		{name: "starting on the source branch", start: "dev"},
+		{name: "interactive, starting on the target branch", start: "prod", interactive: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Given: the same root and part on dev and prod, with api ahead on dev
+			f := newPromoteFixture(t)
+			root, part := f.sameFilesOnTwoBranches(tt.start)
+			rootBefore := f.read(root)
+			req := promoteRequest(root, root)
+			req.SourceBranch, req.TargetBranch = "dev", "prod"
+
+			// When: dev is promoted to prod
+			var err error
+			if tt.interactive {
+				err = runInteractivePromotion(NewService(".", false), req, strings.NewReader("y\na\ny\n"), io.Discard)
+			} else {
+				_, err = NewService(".", false).PromoteDesiredState(req)
+			}
+
+			// Then: prod is checked out with dev's api version in its part, left for the user to commit
+			if err != nil {
+				t.Fatalf("promotion: %v", err)
+			}
+			if branch := f.git("branch", "--show-current"); branch != "prod" {
+				t.Errorf("checked out %q, want prod", branch)
+			}
+			assertTag(t, f.read(part), "api", "2.1.0")
+			if got := f.read(root); got != rootBefore {
+				t.Errorf("root changed:\n%s", got)
+			}
+			if status := f.git("status", "--porcelain", "--untracked-files=no"); status != "M app.yaml" {
+				t.Errorf("git status = %q, want only app.yaml modified", status)
+			}
+		})
+	}
+}
+
+func TestPromote_RefusesUncommittedChanges_BehavioralBDD(t *testing.T) {
+	contract := PromoteBehavioralContract{
+		Behavior:        "Refuse to switch branches for a promotion while tracked files have uncommitted changes",
+		CurrentImpl:     "uRepo.SwitchWorktree checks git status before git checkout and never stashes",
+		ExpectedOutcome: "An error naming the uncommitted change, with the branch and the edit left as they were",
+		Rationale:       "Checking out another branch would carry the edit over or fail part way, and stashing would hide the user's work",
+	}
+	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
+
+	// Given: prod checked out with an uncommitted edit to the root
+	f := newPromoteFixture(t)
+	root, _ := f.sameFilesOnTwoBranches("prod")
+	edited := f.read(root) + "# local edit\n"
+	f.write(root, edited)
+	req := promoteRequest(root, root)
+	req.SourceBranch, req.TargetBranch = "dev", "prod"
+
+	// When: dev is promoted to prod
+	_, err := NewService(".", false).PromoteDesiredState(req)
+
+	// Then: it refuses and nothing moved
+	if err == nil || !strings.Contains(err.Error(), "uncommitted changes") {
+		t.Fatalf("error = %v, want one about uncommitted changes", err)
+	}
+	if branch := f.git("branch", "--show-current"); branch != "prod" {
+		t.Errorf("checked out %q, want prod", branch)
+	}
+	if got := f.read(root); got != edited {
+		t.Errorf("the local edit is gone:\n%s", got)
+	}
+	if stashes := f.git("stash", "list"); stashes != "" {
+		t.Errorf("changes were stashed: %s", stashes)
+	}
+}

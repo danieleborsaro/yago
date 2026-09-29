@@ -130,3 +130,105 @@ func TestRepositoryCheckoutRef_UnknownRef_BehavioralBDD(t *testing.T) {
 		t.Errorf("HEAD moved to %s after a failed checkout, want %s", got, fx.mainHash)
 	}
 }
+
+func TestSwitchWorktree_BehavioralBDD(t *testing.T) {
+	contract := BehavioralContract{
+		Behavior:        "Check out a branch in the work tree holding a file, the way promote reads each side",
+		CurrentImpl:     "SwitchWorktree runs git rev-parse, symbolic-ref, status and checkout in that work tree",
+		ExpectedOutcome: "It switches when it has to, leaves an already checked out branch alone and refuses uncommitted changes",
+		Rationale:       "Promote reads the source and destination on their own branches without losing or stashing local work",
+	}
+	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
+
+	// SwitchWorktree runs git with the process environment, so the developer's config is kept out here too
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+
+	tests := []struct {
+		name       string
+		ref        string
+		prepare    func(t *testing.T, repo string)
+		wantErr    string
+		wantBranch string
+	}{
+		{name: "switches to another branch", ref: "feature", wantBranch: "feature"},
+		{
+			name: "leaves the checked out branch alone, local edits too",
+			ref:  "main",
+			prepare: func(t *testing.T, repo string) {
+				writeFile(t, filepath.Join(repo, "desiredstate.yaml"), "edited\n")
+			},
+			wantBranch: "main",
+		},
+		{
+			name: "refuses uncommitted changes",
+			ref:  "feature",
+			prepare: func(t *testing.T, repo string) {
+				writeFile(t, filepath.Join(repo, "desiredstate.yaml"), "edited\n")
+			},
+			wantErr:    "uncommitted changes",
+			wantBranch: "main",
+		},
+		{
+			name: "untracked files don't count",
+			ref:  "feature",
+			prepare: func(t *testing.T, repo string) {
+				writeFile(t, filepath.Join(repo, "notes.txt"), "scratch\n")
+			},
+			wantBranch: "feature",
+		},
+		{name: "unknown ref", ref: "does-not-exist", wantErr: "failed to check out", wantBranch: "main"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Given: a repo on main with a feature branch, and maybe some local changes
+			repo := t.TempDir()
+			gitCmd(t, repo, "init", "-q", "-b", "main")
+			writeFile(t, filepath.Join(repo, "desiredstate.yaml"), "main\n")
+			gitCmd(t, repo, "add", "desiredstate.yaml")
+			gitCmd(t, repo, "commit", "-q", "-m", "main")
+			gitCmd(t, repo, "branch", "feature")
+			if tt.prepare != nil {
+				tt.prepare(t, repo)
+			}
+
+			// When: the file's work tree is switched to ref
+			err := SwitchWorktree(filepath.Join(repo, "desiredstate.yaml"), tt.ref)
+
+			// Then: it switched or refused as expected
+			if tt.wantErr == "" && err != nil {
+				t.Fatalf("SwitchWorktree: %v", err)
+			}
+			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Fatalf("error = %v, want one containing %q", err, tt.wantErr)
+			}
+			if got := gitCmd(t, repo, "branch", "--show-current"); got != tt.wantBranch {
+				t.Errorf("checked out %q, want %q", got, tt.wantBranch)
+			}
+			if stashes := gitCmd(t, repo, "stash", "list"); stashes != "" {
+				t.Errorf("changes were stashed: %s", stashes)
+			}
+		})
+	}
+
+	t.Run("outside a git repository", func(t *testing.T) {
+		// Given: a file that isn't in any repository
+		dir := t.TempDir()
+		writeFile(t, filepath.Join(dir, "desiredstate.yaml"), "plain\n")
+
+		// When: its work tree is switched
+		err := SwitchWorktree(filepath.Join(dir, "desiredstate.yaml"), "main")
+
+		// Then: it warns and carries on with the file as it is, like the python tool
+		if err != nil {
+			t.Errorf("SwitchWorktree outside a repository: %v", err)
+		}
+	})
+}
+
+func writeFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
