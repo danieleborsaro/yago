@@ -438,7 +438,7 @@ func snapshotDestination(doc *core.GitOpsDocument, root string, head uRepo.Head)
 
 	snapshot := &destinationSnapshot{head: head, files: make(map[string][]byte, len(paths))}
 	for _, path := range paths {
-		content, err := os.ReadFile(path)
+		content, err := os.ReadFile(filepath.Clean(path))
 		if err != nil {
 			return nil, errors.Wrapf(errors.ErrParse, err, "failed to read destination file %s", path)
 		}
@@ -458,7 +458,7 @@ func (d *destinationSnapshot) verify(root string) error {
 			d.head, head)
 	}
 	for _, path := range slices.Sorted(maps.Keys(d.files)) {
-		current, err := os.ReadFile(path)
+		current, err := os.ReadFile(filepath.Clean(path))
 		if err != nil || !bytes.Equal(current, d.files[path]) {
 			return errors.Newf(errors.ErrFail,
 				"%s changed after it was compared, nothing was written, run the promotion again", path)
