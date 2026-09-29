@@ -234,6 +234,14 @@ desiredstate:
 - `gitops.getEnvValue(VAR_NAME, default)`: Get environment variable with fallback
 - `gitops.getYamlValue(path.to.value)`: Get value from YAML document
 
+## Terraform Saved Plans
+
+`yago tf plan` saves the plan in the code directory as `gitops.tf-provision.tfplan`, or as
+`gitops.tf-destroy.tfplan` with `--plan-for-destroy`, the names the Python gitops tool used. `tf provision`,
+`tf destroy --destroy-with-planfile` and `tf costs --use-planfile` look for that name first, then for `tfplan` or
+`tfplan-destroy` in the code directory or under `.gitops`, as saved by older versions of yago. The plan's secret
+references file is the one next to whichever plan is used.
+
 ## Terraform Secret Inputs
 
 A Terraform configuration part can set Terraform variables from existing AWS Secrets Manager secrets with

@@ -413,7 +413,7 @@ func (s *Service) Plan(req PlanRequest) (*PlanResponse, error) {
 		if len(pinned) > 0 {
 			manifest.Variables = pinned
 		}
-		if err := writeSecretManifest(terraformPlanPath(req.WorkingDir, req.OutFile)+planSecretSuffix, manifest); err != nil {
+		if err := writeSecretManifest(planSecretManifest(req.WorkingDir, req.OutFile), manifest); err != nil {
 			return nil, fmt.Errorf("failed to save secret references alongside Terraform plan: %w", err)
 		}
 	}
@@ -467,7 +467,7 @@ func (s *Service) Apply(req ApplyRequest) (*ApplyResponse, error) {
 
 	manifestPath := defaultSecretManifest(req.WorkingDir)
 	if req.PlanFile != "" {
-		planManifest := terraformPlanPath(req.WorkingDir, req.PlanFile) + planSecretSuffix
+		planManifest := planSecretManifest(req.WorkingDir, req.PlanFile)
 		if _, err := os.Stat(planManifest); err == nil {
 			manifest, err := readSecretManifest(planManifest)
 			if err != nil {
