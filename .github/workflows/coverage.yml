@@ -290,7 +290,7 @@ jobs:
           fi
 
       - name: Commit coverage history
-        if: github.event_name != 'pull_request'PAT
+        if: github.event_name != 'pull_request'
         env:
           GPG_PRIVATE_KEY: ${{ secrets.PUSH_GPG_PRIVATE_KEY }}
           GPG_KEY_ID: ${{ secrets.PUSH_GPG_KEY_ID }}
