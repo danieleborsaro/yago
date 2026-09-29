@@ -63,6 +63,46 @@ func writePlan(t *testing.T, codeDir, planPath string) string {
 	return plan
 }
 
+func TestTerraformCommands_DryRunRunsNothing_BehavioralBDD(t *testing.T) {
+	contract := BehavioralContract{
+		Behavior:        "tf provision and tf destroy with --dry-run don't run terraform",
+		CurrentImpl:     "runProvision and runDestroy call SetDryRun on the service when --dry-run is set",
+		ExpectedOutcome: "No terraform command runs, only what would run is logged",
+		Rationale:       "--dry-run used to be ignored, so destroy --dry-run with a plan file really destroyed",
+	}
+	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
+
+	tests := []struct {
+		name string
+		plan string
+		run  func(*commonFlags) error
+	}{
+		{name: "provision", plan: provisionPlanName, run: func(f *commonFlags) error { return runProvision(f, true) }},
+		{name: "destroy with plan file", plan: destroyPlanName, run: func(f *commonFlags) error {
+			return runDestroy(f, false, false, false, false, false, true, false, true)
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Given: a code directory with a saved plan
+			log := fakeTerraform(t)
+			codeDir := t.TempDir()
+			writePlan(t, codeDir, tt.plan)
+
+			// When: the command runs with --dry-run
+			err := tt.run(&commonFlags{awsRegion: "eu-west-1", terraformSource: codeDir})
+
+			// Then: terraform was never called
+			if err != nil {
+				t.Fatalf("dry run: %v", err)
+			}
+			if calls := terraformCalls(t, log); len(calls) != 0 {
+				t.Errorf("--dry-run ran terraform: %q", calls)
+			}
+		})
+	}
+}
+
 func TestTerraformProvision_AppliesSavedPlan_BehavioralBDD(t *testing.T) {
 	contract := BehavioralContract{
 		Behavior:        "tf provision applies the saved plan under the python name, or under a name yago used before",
