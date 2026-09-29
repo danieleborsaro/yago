@@ -60,16 +60,6 @@ changelog:
       - "^ chore:"
 
 brews:
-  - repository:
-      owner: danieleborsaro
-      name: homebrew-gitops
-      token: "{{ .Env.TAP_GITHUB_TOKEN }}"
-    folder: Formula
-    homepage: "https://github.com/danieleborsaro/homebrew-gitops"
-    description: "Yago is a GitOps tool for managing your infrastructure as code"
-
-# .goreleaser.yaml (in Repo A)
-brews:
   - name: yago
     repository:
       owner: danieleborsaro
@@ -81,7 +71,6 @@ brews:
     # Enable Pull Request creation
     pull_request:
       enabled: true
-      # Optional: explicitly define target branch (defaults to main/master)
       base:
         owner: danieleborsaro
         name: homebrew-gitops
