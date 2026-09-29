@@ -126,7 +126,7 @@ func worktreeTop(path string) (string, error) {
 func gitOutput(dir string, args ...string) (string, error) {
 	var out string
 	err := withSafeDirectoryRetry(dir, logging.NewLogger(logging.INFO), func() error {
-		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...) //nolint:gosec // only ever git, and no shell is involved
 		cmd.Env = append(os.Environ(), "LC_ALL=C")
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout, cmd.Stderr = &stdout, &stderr
