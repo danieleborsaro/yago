@@ -106,8 +106,8 @@ yago desiredstate validate --schema-version 2.0.0 myfile.yaml
 # Assemble multiple YAML files
 yago desiredstate assemble file1.yaml file2.yaml --output merged.yaml
 
-# Promote configuration between environments
-yago desiredstate promote --source-file dev.yaml --destination-file prod.yaml
+# Promote the desired state on one branch into the one on another
+yago desiredstate promote -r eu-west-1 -d desiredstate.yaml -D desiredstate.yaml -S dev -T prod
 
 # Compare two configurations
 yago desiredstate compare dev.yaml prod.yaml
@@ -206,10 +206,19 @@ yago ds assemble \
 
 ```bash
 yago ds promote \
-  --source-file staging/app.yaml \
-  --destination-file production/app.yaml \
+  --aws-region eu-west-1 \
+  --desiredstate-root staging/app.yaml \
+  --desiredstate-destination-root production/app.yaml \
+  --source-branch main \
+  --target-branch main \
   --dry-run
 ```
+
+Promote checks out `--source-branch` in the source's repository and loads the source with all its parts, then
+checks out `--target-branch` and loads and writes the destination, as the Python gitops tool did. The source and
+destination can be the same path on two branches. Dry runs check out the branches too, so they read the right
+versions. If tracked files have uncommitted changes when a branch has to be checked out, promote stops. It never
+stashes them. It leaves the target branch checked out with the promoted versions for you to commit.
 
 ## YAML Lookup Functions
 
