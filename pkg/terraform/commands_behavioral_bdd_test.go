@@ -568,3 +568,93 @@ func TestTerraformUnlock_Arguments_BehavioralBDD(t *testing.T) {
 		})
 	}
 }
+
+func TestTerraformCommands_EnvironmentHasNoDefault_BehavioralBDD(t *testing.T) {
+	contract := BehavioralContract{
+		Behavior:        "tf commands don't default -e to all",
+		CurrentImpl:     "addCommonFlags gives -e whatever default the command set, which is nothing apart from assemble's placeholder",
+		ExpectedOutcome: "Every tf subcommand's -e defaults to empty, and assemble's to the placeholder it rejects",
+		Rationale:       "Defaulting to all meant forgetting -e quietly planned, applied or destroyed the all environment",
+	}
+	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
+
+	// Given: the tf command tree
+	tf := NewTerraformCommand()
+
+	for _, sub := range tf.Commands() {
+		t.Run(sub.Name(), func(t *testing.T) {
+			// When: reading the subcommand's -e flag
+			flag := sub.Flags().Lookup("environment")
+
+			// Then: it has no usable default
+			if flag == nil {
+				t.Fatalf("tf %s has no -e flag", sub.Name())
+			}
+			want := ""
+			if sub.Name() == "assemble" {
+				want = defaultAssembleEnvironment
+			}
+			if flag.DefValue != want {
+				t.Errorf("tf %s -e defaults to %q, want %q", sub.Name(), flag.DefValue, want)
+			}
+		})
+	}
+}
+
+func TestTerraformCommands_RefuseToRunWithoutEnvironment_BehavioralBDD(t *testing.T) {
+	contract := BehavioralContract{
+		Behavior:        "tf commands that read the desired state refuse to run without -e",
+		CurrentImpl:     "prepareTerraformAssembledInputs, and runProvision when given -d, check the environment with validateAssembleEnvironment",
+		ExpectedOutcome: "An error asking for --environment and no terraform call",
+		Rationale:       "The environment picks which configuration terraform gets, so guessing one could deploy or destroy the wrong thing",
+	}
+	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
+
+	root := yagoRootFromTestFile(t)
+	chdirForTest(t, root)
+	prevNamespace := schema.GetNamespaceOverride()
+	schema.SetNamespaceOverride("legacy")
+	t.Cleanup(func() { schema.SetNamespaceOverride(prevNamespace) })
+
+	tests := []struct {
+		name string
+		run  func(*commonFlags) error
+	}{
+		{name: "init", run: func(f *commonFlags) error { return runInit(f, false, false, false, false, false) }},
+		{name: "plan", run: func(f *commonFlags) error { return runPlan(f, false, false, false, false, false, false, false, false) }},
+		{name: "provision with a desired state", run: func(f *commonFlags) error { return runProvision(f, false) }},
+		{name: "destroy without a plan file", run: func(f *commonFlags) error {
+			return runDestroy(f, false, false, false, false, false, false, false, false)
+		}},
+		{name: "output", run: func(f *commonFlags) error { return runOutput(f, "", false, false, false, false, false) }},
+		{name: "graph", run: func(f *commonFlags) error { return runGraph(f, "plan", false, false, false, false, false) }},
+		{name: "import", run: func(f *commonFlags) error { return runImport(f, "aws_s3_bucket.example", "example-bucket", false) }},
+		{name: "costs without a plan file", run: func(f *commonFlags) error { return runCosts(f, false) }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Given: a desired state, a configuration and a saved plan, but no -e
+			log := fakeTerraform(t)
+			codeDir := t.TempDir()
+			writePlan(t, codeDir, provisionPlanName)
+			flags := &commonFlags{
+				awsRegion:         "eu-west-1",
+				workspace:         "default",
+				desiredstateRoot:  filepath.Join("tests", "assets", "4.2.0", "desiredstates", "concourse-cluster", "desiredstate.yaml"),
+				configurationRoot: filepath.Join("tests", "assets", "4.2.0", "configurations", "concourse-cluster", "configuration.yaml"),
+				terraformSource:   codeDir,
+			}
+
+			// When: the command runs
+			err := tt.run(flags)
+
+			// Then: it asks for --environment and terraform never runs
+			if err == nil || !strings.Contains(err.Error(), "--environment is mandatory") {
+				t.Errorf("error = %v, want it to ask for --environment", err)
+			}
+			if calls := terraformCalls(t, log); len(calls) != 0 {
+				t.Errorf("terraform ran without -e: %q", calls)
+			}
+		})
+	}
+}
