@@ -2,10 +2,13 @@ package terraform
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/danieleborsaro/yago/internal/schema"
 )
@@ -371,6 +374,196 @@ func TestTerraformDestroy_AppliesDestroyPlan_BehavioralBDD(t *testing.T) {
 			}
 			if calls := terraformCalls(t, log); len(calls) != 1 || calls[0] != "apply "+plan {
 				t.Errorf("terraform calls = %q, want [%q]", calls, "apply "+plan)
+			}
+		})
+	}
+}
+
+// copied from a real terraform 1.13.3 apply
+const colouredPrompt = "  \x1b[1mEnter a value:\x1b[0m \x1b[0m"
+
+func TestTerraformConfirmation_PromptShowsBeforeTerraformReads_BehavioralBDD(t *testing.T) {
+	contract := BehavioralContract{
+		Behavior:        "Terraform's confirmation prompt is on screen while it waits, and the answer comes from yago's stdin",
+		CurrentImpl:     "runTerraformCommandWithSecrets passes s.stdin through and lineWriter shows a line that is only the prompt",
+		ExpectedOutcome: "The user sees the coloured prompt, types yes, and terraform gets it",
+		Rationale:       "Go gives a child an empty stdin, and a prompt without a newline stayed buffered, so the user could never answer",
+	}
+	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
+
+	// Given: a terraform that prints the real coloured prompt and waits for an answer
+	dir := givenFakeTerraform(t, `#!/bin/sh
+printf 'Only '"'"'yes'"'"' will be accepted to confirm.\n\n`+strings.ReplaceAll(colouredPrompt, "\x1b", `\033`)+`'
+read answer
+echo "$answer" > answer.txt
+`)
+	service := NewService(dir, false)
+	answer, typing := io.Pipe()
+	service.stdin = answer
+	promptShown := make(chan struct{})
+	var once sync.Once
+	service.stdout = &consoleWriter{onWrite: func(written string) {
+		if strings.HasSuffix(written, colouredPrompt) {
+			once.Do(func() { close(promptShown) })
+		}
+	}}
+
+	// Given: a user who only types once the prompt is on screen
+	go func() {
+		select {
+		case <-promptShown:
+			_, _ = typing.Write([]byte("yes\n"))
+		case <-time.After(10 * time.Second):
+		}
+		_ = typing.Close()
+	}()
+
+	// When: an unconfirmed unlock runs
+	_, err := service.Unlock(UnlockRequest{WorkingDir: dir, LockID: "abc-123"})
+
+	// Then: the prompt was shown and terraform got the answer typed after it
+	if err != nil {
+		t.Fatalf("Unlock: %v", err)
+	}
+	select {
+	case <-promptShown:
+	default:
+		t.Fatal("the prompt never reached the screen while terraform waited")
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "answer.txt"))
+	if err != nil || strings.TrimSpace(string(got)) != "yes" {
+		t.Errorf("terraform read %q (%v), want yes", got, err)
+	}
+}
+
+func TestTerraformOutput_ShowsOnlyASafePromptEarly_BehavioralBDD(t *testing.T) {
+	contract := BehavioralContract{
+		Behavior:        "An unfinished line is shown early only when it is nothing but terraform's prompt",
+		CurrentImpl:     "lineWriter.showPrompt strips colour, needs the line to be the prompt, and skips it when a secret could start there",
+		ExpectedOutcome: "Plain and coloured prompts show at once, anything else waits for its newline and stays redacted",
+		Rationale:       "Showing part of a line early could print the first half of a secret the redactor would have caught whole",
+	}
+	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
+
+	tests := []struct {
+		name      string
+		secret    string
+		writes    []string
+		wantEarly string // on screen after every write but the last
+		wantFinal string
+	}{
+		{
+			name:      "plain prompt",
+			writes:    []string{"Plan: 0 to add, 0 to destroy.\n\n  Enter a value: ", "yes\n"},
+			wantEarly: "Plan: 0 to add, 0 to destroy.\n\n  Enter a value: ",
+			wantFinal: "Plan: 0 to add, 0 to destroy.\n\n  Enter a value: yes\n",
+		},
+		{
+			name:      "coloured prompt",
+			writes:    []string{colouredPrompt, "\n"},
+			wantEarly: colouredPrompt,
+			wantFinal: colouredPrompt + "\n",
+		},
+		{
+			name:      "any other unfinished line waits",
+			writes:    []string{"Plan: 0 to add", ", 0 to destroy.\n"},
+			wantFinal: "Plan: 0 to add, 0 to destroy.\n",
+		},
+		{
+			name:      "prompt text inside a secret",
+			secret:    "token Enter a value: suffix",
+			writes:    []string{"token Enter a value: ", "suffix\n"},
+			wantFinal: "[REDACTED]\n",
+		},
+		{
+			name:      "secret starting inside the prompt",
+			secret:    "value: suffix",
+			writes:    []string{"  Enter a value: ", "suffix\n"},
+			wantFinal: "  Enter a [REDACTED]\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Given: a writer showing terraform's output, maybe with a secret to hide
+			var screen strings.Builder
+			env := map[string]string{}
+			if tt.secret != "" {
+				env["TF_VAR_example"] = tt.secret
+			}
+			w := &lineWriter{out: &screen, redactor: newSecretRedactor(env)}
+
+			// When: terraform's output arrives in pieces
+			for _, chunk := range tt.writes[:len(tt.writes)-1] {
+				_, _ = w.Write([]byte(chunk))
+			}
+
+			// Then: only a safe prompt has been shown so far
+			if screen.String() != tt.wantEarly {
+				t.Errorf("shown early = %q, want %q", screen.String(), tt.wantEarly)
+			}
+
+			// When: the rest arrives
+			_, _ = w.Write([]byte(tt.writes[len(tt.writes)-1]))
+			w.flush()
+
+			// Then: the whole output is shown with the secret hidden
+			if screen.String() != tt.wantFinal {
+				t.Errorf("shown = %q, want %q", screen.String(), tt.wantFinal)
+			}
+		})
+	}
+}
+
+func TestTerraformUnlock_Arguments_BehavioralBDD(t *testing.T) {
+	contract := BehavioralContract{
+		Behavior:        "tf unlock force unlocks the given lock ID",
+		CurrentImpl:     "runUnlock validates its flags and calls terraform force-unlock",
+		ExpectedOutcome: "force-unlock with -force only when confirmed, and no call when flags are missing",
+		Rationale:       "Unlocking the wrong state, or unlocking without being asked, can corrupt it",
+	}
+	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
+
+	tests := []struct {
+		name      string
+		lockID    string
+		confirm   bool
+		hasSource bool
+		want      string
+		wantErr   string
+	}{
+		{name: "confirmed", lockID: "abc-123", confirm: true, hasSource: true, want: "force-unlock -force abc-123"},
+		{name: "not confirmed", lockID: "abc-123", hasSource: true, want: "force-unlock abc-123"},
+		{name: "missing lock id", hasSource: true, wantErr: "lock ID is required"},
+		{name: "missing source", lockID: "abc-123", wantErr: "terraform source directory is required"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Given: a stub terraform and these flags
+			log := fakeTerraform(t)
+			flags := &commonFlags{awsRegion: "eu-west-1"}
+			if tt.hasSource {
+				flags.terraformSource = t.TempDir()
+			}
+
+			// When: unlock runs
+			err := runUnlock(flags, tt.lockID, tt.confirm)
+
+			// Then: it calls force-unlock as expected, or fails without calling terraform
+			calls := terraformCalls(t, log)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("error = %v, want one containing %q", err, tt.wantErr)
+				}
+				if len(calls) != 0 {
+					t.Errorf("terraform ran despite the error: %q", calls)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("runUnlock: %v", err)
+			}
+			if len(calls) != 1 || calls[0] != tt.want {
+				t.Errorf("terraform calls = %q, want [%q]", calls, tt.want)
 			}
 		})
 	}

@@ -134,6 +134,7 @@ var ansiEscape = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
 
 type secretRedactor struct {
 	replacer *strings.Replacer
+	values   []string
 	lines    map[string]struct{}
 }
 
@@ -268,5 +269,6 @@ func newSecretRedactor(env map[string]string) *secretRedactor {
 		replacements = append(replacements, value, "[REDACTED]")
 	}
 	redactor.replacer = strings.NewReplacer(replacements...)
+	redactor.values = ordered
 	return redactor
 }
