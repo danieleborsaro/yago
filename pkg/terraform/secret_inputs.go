@@ -107,6 +107,11 @@ func terraformPlanPath(workingDir, planFile string) string {
 	return filepath.Join(workingDir, planFile)
 }
 
+// planSecretManifest is the sidecar pinning a saved plan's secret versions, it follows the plan's own name
+func planSecretManifest(workingDir, planFile string) string {
+	return terraformPlanPath(workingDir, planFile) + planSecretSuffix
+}
+
 func (s *Service) secretEnvironment(manifestPath string) (map[string]string, map[string]SecretVariableBinding, error) {
 	manifest, err := readSecretManifest(manifestPath)
 	if err != nil || len(manifest.Variables) == 0 {
