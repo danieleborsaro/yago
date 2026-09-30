@@ -296,6 +296,8 @@ jobs:
           GPG_KEY_ID: ${{ secrets.PUSH_GPG_KEY_ID }}
           COVERAGE_BRANCH: "coverage-history" # Your target branch name
         run: |
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
           git config --local user.signingkey "$GPG_KEY_ID"
