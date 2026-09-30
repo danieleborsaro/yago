@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // puts a fake git first on PATH that writes its args one per line to the returned file, then runs body
@@ -92,12 +93,41 @@ func TestLsRemote_EndsOptionsBeforeURL_BehavioralBDD(t *testing.T) {
 	}
 }
 
+func TestLsRemote_HungRemote_BehavioralBDD(t *testing.T) {
+	contract := BehavioralContract{
+		Behavior:        "ls-remote gives up on a remote that never answers",
+		CurrentImpl:     "LsRemote runs git under a context deadline with a WaitDelay for leftover children",
+		ExpectedOutcome: "A timed out error comes back soon after the deadline instead of hanging",
+		Rationale:       "An unreachable host or a credential prompt used to hang yago with no way out but ctrl c",
+	}
+	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
+
+	// Given: a git that hangs, and a short deadline
+	fakeGit(t, "sleep 30")
+	old := lsRemoteTimeout
+	lsRemoteTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { lsRemoteTimeout = old })
+
+	// When: ls-remote runs
+	start := time.Now()
+	_, err := LsRemote(nil, "https://example.com/foo/bar.git")
+	elapsed := time.Since(start)
+
+	// Then: it times out well before the fake git would have finished
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("LsRemote error = %v, want a timeout", err)
+	}
+	if elapsed > 10*time.Second {
+		t.Errorf("LsRemote took %s, the deadline was %s", elapsed, lsRemoteTimeout)
+	}
+}
+
 func TestLsRemote_LocalRemote_BehavioralBDD(t *testing.T) {
 	contract := BehavioralContract{
 		Behavior:        "ls-remote still lists refs from a real remote",
 		CurrentImpl:     "LsRemote returns stdout of git ls-remote",
 		ExpectedOutcome: "The branch and its commit come back, and a missing ref gives empty output",
-		Rationale:       "The -- must not change what callers parse",
+		Rationale:       "The -- and the timeout must not change what callers parse",
 	}
 	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
 
