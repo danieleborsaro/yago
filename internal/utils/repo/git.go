@@ -101,6 +101,31 @@ func unsafeRepositoryPath(err error, path string) string {
 	return top
 }
 
+// swapped in tests, another owner can't be made without root
+var fileOwner = lookupOwner
+
+// trusts the repo yago was pointed at, or one further up whose .git has the same owner as the folder yago was
+// pointed at, so a repo someone else made above it, like /tmp/.git, still gets git's refusal
+func trustedRepository(path, top string) bool {
+	pathInfo, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	if topInfo, err := os.Stat(top); err == nil && os.SameFile(pathInfo, topInfo) {
+		return true
+	}
+	gitDir := filepath.Join(top, ".git")
+	if _, err := os.Stat(gitDir); err != nil {
+		gitDir = top
+	}
+	pathOwner, ok := fileOwner(path)
+	if !ok {
+		return false
+	}
+	gitOwner, ok := fileOwner(gitDir)
+	return ok && pathOwner == gitOwner
+}
+
 // withSafeDirectoryRetry runs a git command, and if git refuses the repo for its ownership (common with Docker volumes)
 // runs it once more with the extra args, they trust that one repo for that one command so the user's global git config is never written
 func withSafeDirectoryRetry(path string, logger *logging.Logger, fn func(extraArgs []string) error) error {
@@ -109,6 +134,10 @@ func withSafeDirectoryRetry(path string, logger *logging.Logger, fn func(extraAr
 		return err
 	}
 	top := unsafeRepositoryPath(err, path)
+	if !trustedRepository(path, top) {
+		logger.Debug("Git refused %s for its ownership, and it isn't trusted since %s has another owner", top, path)
+		return err
+	}
 	logger.Debug("Git refused %s for its ownership, retrying with safe.directory set for this command only", top)
 	return fn([]string{"-c", "safe.directory=" + top})
 }

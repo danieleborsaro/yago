@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -88,6 +89,53 @@ func TestSafeDirectory_LeavesGlobalConfigAlone_BehavioralBDD(t *testing.T) {
 			assertEmptyFile(t, globalConfig)
 		})
 	}
+}
+
+func TestSafeDirectory_RepoAboveWithAnotherOwner_BehavioralBDD(t *testing.T) {
+	contract := BehavioralContract{
+		Behavior:        "A repo above the folder yago was pointed at is only trusted when its .git has the folder's owner",
+		CurrentImpl:     "trustedRepository compares the owners before withSafeDirectoryRetry sets safe.directory",
+		ExpectedOutcome: "Pointing at the repo itself still works, a folder inside a repo with another owner gets git's refusal back",
+		Rationale:       "Trusting whatever repo git found further up, like someone else's /tmp/.git, would run its hooks and fsmonitor as the user, which safe.directory is there to stop",
+	}
+	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
+
+	// Given: a repo git treats as owned by someone else, with its .git owned by another user than its folders
+	root, mainHash := newNamedRepo(t, "repo")
+	globalConfig := assumeDifferentOwner(t)
+	old := fileOwner
+	fileOwner = func(path string) (uint32, bool) {
+		if filepath.Base(path) == ".git" {
+			return 2, true
+		}
+		return 1, true
+	}
+	t.Cleanup(func() { fileOwner = old })
+
+	t.Run("subdirectory", func(t *testing.T) {
+		// When: the head is read from a folder inside the repo
+		_, err := WorktreeHead(filepath.Join(root, "sub"))
+
+		// Then: git's refusal comes back and the global config is untouched
+		if err == nil || !strings.Contains(err.Error(), "dubious ownership") {
+			t.Fatalf("WorktreeHead error = %v, want git's ownership refusal", err)
+		}
+		assertEmptyFile(t, globalConfig)
+	})
+
+	t.Run("root", func(t *testing.T) {
+		// When: the head is read from the repo itself
+		head, err := WorktreeHead(root)
+
+		// Then: pointing at it is enough to trust it
+		if err != nil {
+			t.Fatalf("WorktreeHead: %v", err)
+		}
+		if head.Branch != "main" || head.Commit != mainHash {
+			t.Errorf("head = %s, want main at %s", head, mainHash)
+		}
+		assertEmptyFile(t, globalConfig)
+	})
 }
 
 func TestSafeDirectory_RepoPathFromGitsMessage_BehavioralBDD(t *testing.T) {
