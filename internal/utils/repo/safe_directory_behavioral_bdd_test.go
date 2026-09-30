@@ -170,28 +170,63 @@ func TestSafeDirectory_OwnersDecideTrust_BehavioralBDD(t *testing.T) {
 
 func TestSafeDirectory_LinkedWorktreeGitDir_BehavioralBDD(t *testing.T) {
 	contract := BehavioralContract{
-		Behavior:        "A linked worktree is only trusted when the gitdir its .git file names has the same owner too",
-		CurrentImpl:     "trustedRepository reads the gitdir from a .git file and checks its owner alongside the worktree and the file",
-		ExpectedOutcome: "One owner throughout is trusted, a gitdir with another owner gets git's refusal back",
-		Rationale:       "git reads config and hooks from that gitdir and checks its owner itself, trusting the worktree alone would run someone else's hooks",
+		Behavior:        "A linked worktree is only trusted when the gitdir its .git file names has the same owner too, found the way git finds it",
+		CurrentImpl:     "trustedRepository follows .git through a symlink, reads the gitdir it names, resolves that gitdir's symlinks, and checks its owner alongside the worktree and .git",
+		ExpectedOutcome: "One owner throughout is trusted, a gitdir with another owner gets git's refusal back, however .git and the gitdir are linked",
+		Rationale:       "git reads config and hooks from that gitdir and checks its owner itself, judging any other path would override git's refusal for someone else's hooks",
 	}
 	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
 
+	// the worktree's .git becomes a symlink to the file naming the gitdir
+	dotGitSymlink := func(t *testing.T, linked string) {
+		t.Helper()
+		pointer := filepath.Join(filepath.Dir(linked), "pointer")
+		if err := os.Rename(filepath.Join(linked, ".git"), pointer); err != nil {
+			t.Fatalf("move .git: %v", err)
+		}
+		if err := os.Symlink(pointer, filepath.Join(linked, ".git")); err != nil {
+			t.Fatalf("symlink .git: %v", err)
+		}
+	}
+	// the worktree's .git names a symlink that leads to the real gitdir
+	gitDirSymlink := func(t *testing.T, linked string) {
+		t.Helper()
+		gitDir, found := gitDirFromFile(filepath.Join(linked, ".git"), 0)
+		if !found {
+			t.Fatalf("no gitdir in %s", linked)
+		}
+		link := filepath.Join(filepath.Dir(linked), "gitlink")
+		if err := os.Symlink(gitDir, link); err != nil {
+			t.Fatalf("symlink gitdir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(linked, ".git"), []byte("gitdir: "+link+"\n"), 0o600); err != nil {
+			t.Fatalf("write .git: %v", err)
+		}
+	}
+
 	tests := []struct {
 		name        string
+		layout      func(t *testing.T, linked string)
 		gitDirOwner uint32
 		trusted     bool
 	}{
 		{name: "gitdir with the worktree's owner", gitDirOwner: 1, trusted: true},
 		{name: "gitdir with another owner", gitDirOwner: 2},
+		{name: ".git symlink to the file, gitdir with the worktree's owner", layout: dotGitSymlink, gitDirOwner: 1, trusted: true},
+		{name: ".git symlink to the file, gitdir with another owner", layout: dotGitSymlink, gitDirOwner: 2},
+		{name: "gitdir through a symlink, real gitdir with the worktree's owner", layout: gitDirSymlink, gitDirOwner: 1, trusted: true},
+		{name: "gitdir through a symlink, real gitdir with another owner", layout: gitDirSymlink, gitDirOwner: 2},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Given: a linked worktree of a repo git refuses for its owner, with the owner of the gitdir its .git file names faked
+			// Given: a linked worktree of a repo git refuses for its owner, laid out as named, with the owner of the real gitdir faked
 			root, mainHash := newNamedRepo(t, "repo")
 			linked := filepath.Join(filepath.Dir(root), "linked")
 			gitCmd(t, root, "worktree", "add", "-q", linked, "feature")
+			if tt.layout != nil {
+				tt.layout(t, linked)
+			}
 			globalConfig := assumeDifferentOwner(t, linked)
 			old := fileOwner
 			fileOwner = func(path string) (uint32, bool) {
@@ -224,23 +259,53 @@ func TestSafeDirectory_LinkedWorktreeGitDir_BehavioralBDD(t *testing.T) {
 func TestSafeDirectory_GitDirFromFile_BehavioralBDD(t *testing.T) {
 	contract := BehavioralContract{
 		Behavior:        "The gitdir a .git file names is read the way git reads it",
-		CurrentImpl:     "gitDirFromFile takes the path after gitdir: and resolves a relative one from the folder holding the file",
-		ExpectedOutcome: "Absolute and relative gitdirs resolve, anything else gives no gitdir so the repo isn't trusted",
-		Rationale:       "The owner check has to look at the same gitdir git will read config and hooks from",
+		CurrentImpl:     "gitDirFromFile strips only line endings, takes a relative path from the folder holding .git, and resolves symlinks like git's realpath",
+		ExpectedOutcome: "The gitdir git would use comes back, a trailing space kept and a symlink resolved, and anything git wouldn't read gives nothing",
+		Rationale:       "The owner check has to judge the same gitdir git reads config and hooks from, otherwise a different path could vouch for it",
 	}
 	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
+	if runtime.GOOS == "windows" {
+		t.Skip("yago can't compare owners on windows, so it never reads a gitdir there")
+	}
 
+	// Given: gitdirs to point at, one whose name ends in a space and one reached through a symlink
 	base := t.TempDir()
+	gitDir := filepath.Join(base, "repo", ".git", "worktrees", "linked")
+	spaced := gitDir + " "
+	link := filepath.Join(base, "gitlink")
+	for _, dir := range []string{gitDir, spaced} {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+	}
+	if err := os.Symlink(gitDir, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	resolved := func(path string) string {
+		t.Helper()
+		target, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			t.Fatalf("resolve %s: %v", path, err)
+		}
+		return target
+	}
+
 	tests := []struct {
 		name    string
 		content string
+		size    int64
 		want    string
 		found   bool
 	}{
-		{name: "absolute", content: "gitdir: /work/repo/.git/worktrees/linked\n", want: "/work/repo/.git/worktrees/linked", found: true},
-		{name: "relative", content: "gitdir: ../repo/.git/worktrees/linked\n", want: filepath.Join(base, "repo", ".git", "worktrees", "linked"), found: true},
+		{name: "absolute", content: "gitdir: " + gitDir + "\n", want: resolved(gitDir), found: true},
+		{name: "relative", content: "gitdir: ../repo/.git/worktrees/linked\n", want: resolved(gitDir), found: true},
+		{name: "windows line ending", content: "gitdir: " + gitDir + "\r\n", want: resolved(gitDir), found: true},
+		{name: "a name ending in a space", content: "gitdir: " + spaced + "\n", want: resolved(spaced), found: true},
+		{name: "through a symlink", content: "gitdir: " + link + "\n", want: resolved(gitDir), found: true},
 		{name: "not a gitdir file", content: "ref: refs/heads/main\n"},
 		{name: "empty gitdir", content: "gitdir: \n"},
+		{name: "a gitdir that isn't there", content: "gitdir: " + filepath.Join(base, "missing") + "\n"},
+		{name: "too large for git to read", content: "gitdir: " + gitDir + "\n", size: 1<<20 + 1},
 	}
 
 	for _, tt := range tests {
@@ -253,9 +318,13 @@ func TestSafeDirectory_GitDirFromFile_BehavioralBDD(t *testing.T) {
 			if err := os.WriteFile(dotGit, []byte(tt.content), 0o600); err != nil {
 				t.Fatalf("write .git: %v", err)
 			}
+			size := tt.size
+			if size == 0 {
+				size = int64(len(tt.content))
+			}
 
 			// When: the gitdir is read from it
-			got, found := gitDirFromFile(dotGit)
+			got, found := gitDirFromFile(dotGit, size)
 
 			// Then: it's the gitdir git would use, or nothing
 			if got != tt.want || found != tt.found {

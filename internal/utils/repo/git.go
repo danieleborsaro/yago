@@ -118,11 +118,12 @@ func trustedRepository(dir, top string) bool {
 	}
 	entries := []string{top}
 	dotGit := filepath.Join(top, ".git")
-	if info, err := os.Lstat(dotGit); err == nil {
+	// like git, .git is followed through a symlink to see whether it's a file naming the gitdir, the gitdir it names
+	// is judged once symlinks are resolved, and .git itself by its own entry
+	if info, err := os.Stat(dotGit); err == nil {
 		entries = append(entries, dotGit)
-		// a linked worktree's .git is a file naming the gitdir git reads config and hooks from, git checks its owner too
 		if info.Mode().IsRegular() {
-			gitDir, ok := gitDirFromFile(dotGit)
+			gitDir, ok := gitDirFromFile(dotGit, info.Size())
 			if !ok {
 				return false
 			}
@@ -137,21 +138,29 @@ func trustedRepository(dir, top string) bool {
 	return true
 }
 
-// reads "gitdir: <path>" the way git does, a relative path is taken from the folder holding the file
-func gitDirFromFile(dotGit string) (string, bool) {
+// read the way git's read_gitfile_gently does, only line endings come off the end, a relative path is taken from
+// the folder holding .git, and the gitdir is resolved like git's realpath
+func gitDirFromFile(dotGit string, size int64) (string, bool) {
+	if size > 1<<20 {
+		return "", false
+	}
 	data, err := os.ReadFile(filepath.Clean(dotGit))
 	if err != nil {
 		return "", false
 	}
 	gitDir, found := strings.CutPrefix(string(data), "gitdir: ")
-	gitDir = strings.TrimRight(gitDir, " \t\r\n")
+	gitDir = strings.TrimRight(gitDir, "\r\n")
 	if !found || gitDir == "" {
 		return "", false
 	}
 	if !filepath.IsAbs(gitDir) {
-		gitDir = filepath.Join(filepath.Dir(dotGit), gitDir)
+		gitDir = filepath.Dir(dotGit) + string(filepath.Separator) + gitDir
 	}
-	return filepath.Clean(gitDir), true
+	resolved, err := filepath.EvalSymlinks(gitDir)
+	if err != nil {
+		return "", false
+	}
+	return resolved, true
 }
 
 // withSafeDirectoryRetry runs a git command, and if git refuses the repo for its ownership (common with Docker volumes)
