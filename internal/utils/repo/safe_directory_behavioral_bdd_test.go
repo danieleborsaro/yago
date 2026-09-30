@@ -268,17 +268,25 @@ func TestSafeDirectory_GitDirFromFile_BehavioralBDD(t *testing.T) {
 		t.Skip("yago can't compare owners on windows, so it never reads a gitdir there")
 	}
 
-	// Given: gitdirs to point at, one whose name ends in a space and one reached through a symlink
+	// Given: gitdirs to point at, one whose name ends in a space, one reached through a symlink, and decoys where a
+	// lexical .. or a path taken from a pointer file's own folder would land instead of where git lands
 	base := t.TempDir()
 	gitDir := filepath.Join(base, "repo", ".git", "worktrees", "linked")
 	spaced := gitDir + " "
 	link := filepath.Join(base, "gitlink")
-	for _, dir := range []string{gitDir, spaced} {
+	hop := filepath.Join(base, "hop")
+	afterHop := filepath.Join(base, "elsewhere", "x")
+	pointer := filepath.Join(base, "elsewhere", "deep", "pointer")
+	decoys := []string{filepath.Join(base, "x"), filepath.Join(base, "elsewhere", "repo", ".git", "worktrees", "linked")}
+	for _, dir := range append([]string{gitDir, spaced, afterHop, filepath.Join(base, "elsewhere", "sub"), filepath.Dir(pointer)}, decoys...) {
 		if err := os.MkdirAll(dir, 0o750); err != nil {
 			t.Fatalf("mkdir: %v", err)
 		}
 	}
 	if err := os.Symlink(gitDir, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(base, "elsewhere", "sub"), hop); err != nil {
 		t.Fatalf("symlink: %v", err)
 	}
 	resolved := func(path string) string {
@@ -291,17 +299,21 @@ func TestSafeDirectory_GitDirFromFile_BehavioralBDD(t *testing.T) {
 	}
 
 	tests := []struct {
-		name    string
-		content string
-		size    int64
-		want    string
-		found   bool
+		name      string
+		content   string
+		pointerAt string
+		size      int64
+		want      string
+		found     bool
 	}{
 		{name: "absolute", content: "gitdir: " + gitDir + "\n", want: resolved(gitDir), found: true},
 		{name: "relative", content: "gitdir: ../repo/.git/worktrees/linked\n", want: resolved(gitDir), found: true},
 		{name: "windows line ending", content: "gitdir: " + gitDir + "\r\n", want: resolved(gitDir), found: true},
 		{name: "a name ending in a space", content: "gitdir: " + spaced + "\n", want: resolved(spaced), found: true},
 		{name: "through a symlink", content: "gitdir: " + link + "\n", want: resolved(gitDir), found: true},
+		{name: "a symlink then .. in an absolute gitdir", content: "gitdir: " + hop + "/../x\n", want: resolved(afterHop), found: true},
+		{name: "a symlink then .. in a relative gitdir", content: "gitdir: ../hop/../x\n", want: resolved(afterHop), found: true},
+		{name: ".git symlinked to a pointer file elsewhere, relative to the worktree", content: "gitdir: ../repo/.git/worktrees/linked\n", pointerAt: pointer, want: resolved(gitDir), found: true},
 		{name: "not a gitdir file", content: "ref: refs/heads/main\n"},
 		{name: "empty gitdir", content: "gitdir: \n"},
 		{name: "a gitdir that isn't there", content: "gitdir: " + filepath.Join(base, "missing") + "\n"},
@@ -310,12 +322,20 @@ func TestSafeDirectory_GitDirFromFile_BehavioralBDD(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Given: a .git file in a linked worktree
+			// Given: a .git file in a linked worktree, or a .git symlink to a pointer file holding the same
 			dotGit := filepath.Join(base, "linked", ".git")
 			if err := os.MkdirAll(filepath.Dir(dotGit), 0o750); err != nil {
 				t.Fatalf("mkdir: %v", err)
 			}
-			if err := os.WriteFile(dotGit, []byte(tt.content), 0o600); err != nil {
+			_ = os.Remove(dotGit)
+			target := dotGit
+			if tt.pointerAt != "" {
+				target = tt.pointerAt
+				if err := os.Symlink(tt.pointerAt, dotGit); err != nil {
+					t.Fatalf("symlink .git: %v", err)
+				}
+			}
+			if err := os.WriteFile(target, []byte(tt.content), 0o600); err != nil {
 				t.Fatalf("write .git: %v", err)
 			}
 			size := tt.size
