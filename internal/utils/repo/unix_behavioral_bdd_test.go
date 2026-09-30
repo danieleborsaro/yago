@@ -53,8 +53,9 @@ func TestLsRemote_NoTerminalNeverPrompts_BehavioralBDD(t *testing.T) {
 	}
 	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
 
-	// Given: no terminal, and a git that records how it was started
+	// Given: no terminal, prompts not already off in the environment, and a git that records how it was started
 	setTerminal(t, false)
+	t.Setenv("GIT_TERMINAL_PROMPT", "")
 	prompt, pid, pgid := promptRecordingGit(t, "")
 
 	// When: ls-remote runs
@@ -140,24 +141,32 @@ func TestLsRemote_KillsLeftoverChildren_BehavioralBDD(t *testing.T) {
 
 func TestLookupOwner_RealUID_BehavioralBDD(t *testing.T) {
 	contract := BehavioralContract{
-		Behavior:        "A path's owner is read as its real uid, and a missing path has none",
+		Behavior:        "A path's owner is read as its real uid from the path itself, not what a symlink points at, and a missing path has none",
 		CurrentImpl:     "lookupOwner reads Stat_t.Uid from an lstat",
-		ExpectedOutcome: "A folder this process made has its uid, and a missing path gives no owner",
-		Rationale:       "Trusting a repo git refused rests on this uid, a lookup that always agreed would trust someone else's repo",
+		ExpectedOutcome: "A folder this process made has its uid, a dangling symlink still has its own owner, and a missing path gives no owner",
+		Rationale:       "Trusting a repo git refused rests on this uid, git judges a .git symlink by the link itself, and a lookup that always agreed would trust someone else's repo",
 	}
 	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
 
-	// Given: a folder this process made, and a path that isn't there
+	// Given: a folder this process made, a symlink to nothing, and a path that isn't there
 	dir := t.TempDir()
 	missing := filepath.Join(dir, "missing")
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(missing, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
 
 	// When: their owners are looked up
 	owner, ok := lookupOwner(dir)
+	linkOwner, linkOK := lookupOwner(link)
 	_, missingOK := lookupOwner(missing)
 
-	// Then: the folder has this process's uid and the missing path has no owner
+	// Then: the folder and the link have this process's uid and the missing path has no owner
 	if !ok || int(owner) != os.Geteuid() {
 		t.Errorf("lookupOwner(%s) = %d, %v, want %d", dir, owner, ok, os.Geteuid())
+	}
+	if !linkOK || int(linkOwner) != os.Geteuid() {
+		t.Errorf("lookupOwner(%s) = %d, %v, want the link's own owner %d", link, linkOwner, linkOK, os.Geteuid())
 	}
 	if missingOK {
 		t.Errorf("lookupOwner(%s) found an owner for a missing path", missing)

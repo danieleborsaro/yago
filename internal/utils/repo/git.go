@@ -108,10 +108,11 @@ func unsafeRepositoryPath(err error) (string, bool) {
 // swapped in tests, another owner can't be made without root
 var fileOwner = lookupOwner
 
-// the repo and its .git need the owner of what yago was pointed at, the way git checks them against the current
-// user, so a file sitting in /tmp never vouches for someone else's /tmp/.git
-func trustedRepository(pointedAt, top string) bool {
-	owner, ok := fileOwner(pointedAt)
+// the repo and its .git need the owner of the folder yago works in, the way git checks them against the current
+// user, so /tmp never vouches for someone else's /tmp/.git, it's the folder and not a file in it because whoever
+// owns the folder can swap its files anyway, and yago running as root in a container rewrites the files it checks out
+func trustedRepository(dir, top string) bool {
+	owner, ok := fileOwner(dir)
 	if !ok {
 		return false
 	}
@@ -134,7 +135,7 @@ func fileExists(path string) bool {
 
 // withSafeDirectoryRetry runs a git command, and if git refuses the repo for its ownership (common with Docker volumes)
 // runs it once more with the extra args, they trust that one repo for that one command so the user's global git config is never written
-func withSafeDirectoryRetry(pointedAt string, logger *logging.Logger, fn func(extraArgs []string) error) error {
+func withSafeDirectoryRetry(dir string, logger *logging.Logger, fn func(extraArgs []string) error) error {
 	err := fn(nil)
 	if err == nil || !isUnsafeRepositoryError(err) {
 		return err
@@ -143,8 +144,8 @@ func withSafeDirectoryRetry(pointedAt string, logger *logging.Logger, fn func(ex
 	if !found {
 		return err
 	}
-	if !trustedRepository(pointedAt, top) {
-		logger.Debug("Git refused %s for its ownership, and it isn't trusted since %s has another owner", top, pointedAt)
+	if !trustedRepository(dir, top) {
+		logger.Debug("Git refused %s for its ownership, and it isn't trusted since %s has another owner", top, dir)
 		return err
 	}
 	logger.Debug("Git refused %s for its ownership, retrying with safe.directory set for this command only", top)

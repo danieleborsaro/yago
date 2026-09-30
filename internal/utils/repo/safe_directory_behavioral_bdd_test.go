@@ -110,10 +110,10 @@ func TestSafeDirectory_LeavesGlobalConfigAlone_BehavioralBDD(t *testing.T) {
 
 func TestSafeDirectory_OwnersDecideTrust_BehavioralBDD(t *testing.T) {
 	contract := BehavioralContract{
-		Behavior:        "A repo git refuses is only trusted when it and its .git have the owner of what yago was pointed at",
-		CurrentImpl:     "trustedRepository compares the owner of the pointed at file or folder with the repo top and its .git before withSafeDirectoryRetry sets safe.directory",
-		ExpectedOutcome: "One owner throughout is trusted, any other owner on the repo or its .git gets git's refusal back",
-		Rationale:       "Trusting whatever repo git found, like someone else's /tmp/.git above a file sitting in /tmp, would run its hooks and fsmonitor as the user, which safe.directory is there to stop",
+		Behavior:        "A repo git refuses is only trusted when it and its .git have the owner of the folder yago works in",
+		CurrentImpl:     "trustedRepository compares the owner of the folder holding what yago was pointed at with the repo top and its .git before withSafeDirectoryRetry sets safe.directory",
+		ExpectedOutcome: "One owner throughout is trusted whoever owns the file itself, any other owner on the repo or its .git gets git's refusal back",
+		Rationale:       "Trusting whatever repo git found, like someone else's /tmp/.git above a file sitting in /tmp, would run its hooks and fsmonitor as the user, and yago running as root in a container rewrites the files it checks out",
 	}
 	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
 
@@ -126,10 +126,12 @@ func TestSafeDirectory_OwnersDecideTrust_BehavioralBDD(t *testing.T) {
 		{name: "the repo itself with one owner", owners: map[string]uint32{"repo": 1, ".git": 1}, trusted: true},
 		{name: "a folder inside with one owner", point: "sub", owners: map[string]uint32{"repo": 1, "sub": 1, ".git": 1}, trusted: true},
 		{name: "a file inside with one owner", point: "ds.yaml", owners: map[string]uint32{"repo": 1, "ds.yaml": 1, ".git": 1}, trusted: true},
+		{name: "a file root rewrote in a container", point: "ds.yaml", owners: map[string]uint32{"repo": 1, "ds.yaml": 0, ".git": 1}, trusted: true},
+		{name: "a file that isn't there yet", point: "missing.yaml", owners: map[string]uint32{"repo": 1, ".git": 1}, trusted: true},
 		{name: "the repo itself when its .git has another owner", owners: map[string]uint32{"repo": 1, ".git": 2}},
 		{name: "a folder inside when the .git has another owner", point: "sub", owners: map[string]uint32{"repo": 1, "sub": 1, ".git": 2}},
+		{name: "a folder inside when the repo top has another owner", point: "sub", owners: map[string]uint32{"repo": 2, "sub": 1, ".git": 1}},
 		{name: "a file sitting in a folder someone else owns, like /tmp", point: "ds.yaml", owners: map[string]uint32{"repo": 0, "ds.yaml": 1, ".git": 2}},
-		{name: "a file whose owner doesn't own the repo", point: "ds.yaml", owners: map[string]uint32{"repo": 2, "ds.yaml": 1, ".git": 2}},
 	}
 
 	for _, tt := range tests {
