@@ -179,15 +179,7 @@ func NewRepository(path string, config *RepoConfig) (*Repository, error) {
 		}
 	}
 
-	var repo *git.Repository
-	var err error
-
-	// Use safe directory retry wrapper
-	err = withSafeDirectoryRetry(path, config.Logger, func() error {
-		repo, err = git.PlainOpen(path)
-		return err
-	})
-
+	repo, err := git.PlainOpen(path)
 	if err != nil {
 		return nil, errors.Wrapf(errors.ErrParse, err, "failed to open repository at %s", path)
 	}
@@ -230,14 +222,7 @@ func Load(workDir string, config *RepoConfig) (*Repository, bool, error) {
 
 	config.Logger.Info("Loading repo: '%s'", absPath)
 
-	// Try to open as a git repository with safe directory retry
-	var repo *git.Repository
-	err = withSafeDirectoryRetry(absPath, config.Logger, func() error {
-		var openErr error
-		repo, openErr = git.PlainOpen(absPath)
-		return openErr
-	})
-
+	repo, err := git.PlainOpen(absPath)
 	if err != nil {
 		// Not a git repo - this is expected behavior, just warn
 		config.Logger.Warn("Not a Git repo, skipping: %s", absPath)
@@ -514,7 +499,7 @@ func (r *Repository) GetCurrentCommitShort() (string, error) {
 func (r *Repository) CheckoutRef(ref string) error {
 	r.config.Logger.Info("Checking out ref: %s", ref)
 
-	err := withSafeDirectoryRetry(r.path, r.config.Logger, func() error {
+	err := func() error {
 		workTree, err := r.repo.Worktree()
 		if err != nil {
 			return errors.Wrapf(errors.ErrFail, err, "failed to get worktree")
@@ -525,7 +510,7 @@ func (r *Repository) CheckoutRef(ref string) error {
 			return err
 		}
 		return workTree.Checkout(opts)
-	})
+	}()
 
 	if err != nil {
 		return errors.Wrapf(errors.ErrFail, err, "failed to checkout ref %s", ref)
@@ -598,7 +583,7 @@ func (r *Repository) Pull(branch string, fetchAll bool) error {
 	}
 
 	var pullErr error
-	err := withSafeDirectoryRetry(r.path, r.config.Logger, func() error {
+	err := func() error {
 		workTree, err := r.repo.Worktree()
 		if err != nil {
 			return errors.Wrapf(errors.ErrFail, err, "failed to get worktree")
@@ -628,7 +613,7 @@ func (r *Repository) Pull(branch string, fetchAll bool) error {
 
 		pullErr = workTree.Pull(pullOptions)
 		return pullErr
-	})
+	}()
 
 	if err != nil && err != git.NoErrAlreadyUpToDate {
 		return errors.Wrapf(errors.ErrFail, err, "failed to pull")
@@ -696,7 +681,7 @@ func (r *Repository) Fetch(fetchAll bool) error {
 	r.config.Logger.Info("Fetching latest changes from remote")
 
 	var fetchErr error
-	err := withSafeDirectoryRetry(r.path, r.config.Logger, func() error {
+	err := func() error {
 		fetchOptions := &git.FetchOptions{}
 
 		// Add authentication if provided
@@ -715,7 +700,7 @@ func (r *Repository) Fetch(fetchAll bool) error {
 
 		fetchErr = r.repo.Fetch(fetchOptions)
 		return fetchErr
-	})
+	}()
 
 	if err != nil && err != git.NoErrAlreadyUpToDate {
 		return errors.Wrapf(errors.ErrFail, err, "failed to fetch")
