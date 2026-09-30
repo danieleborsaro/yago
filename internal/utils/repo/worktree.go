@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/danieleborsaro/yago/internal/utils/errors"
@@ -125,8 +126,8 @@ func worktreeTop(path string) (string, error) {
 // git's messages are matched on, so they're asked for in english
 func gitOutput(dir string, args ...string) (string, error) {
 	var out string
-	err := withSafeDirectoryRetry(dir, logging.NewLogger(logging.INFO), func() error {
-		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...) //nolint:gosec // only ever git, and no shell is involved
+	err := withSafeDirectoryRetry(dir, logging.NewLogger(logging.INFO), func(extraArgs []string) error {
+		cmd := exec.Command("git", slices.Concat(extraArgs, []string{"-C", dir}, args)...) //nolint:gosec // only ever git, and no shell is involved
 		cmd.Env = append(os.Environ(), "LC_ALL=C")
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout, cmd.Stderr = &stdout, &stderr

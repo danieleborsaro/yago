@@ -86,35 +86,31 @@ func isUnsafeRepositoryError(err error) bool {
 		strings.Contains(errMsg, "dubious ownership")
 }
 
-// markDirectoryAsSafe adds a directory to git's safe.directory config
-// This is needed when working with repositories mounted as Docker volumes
-func markDirectoryAsSafe(path string, logger *logging.Logger) error {
-	logger.Debug("Git work directory %s detected as unsafe, marking as safe (common with Docker volumes)", path)
-
-	cmd := exec.Command("git", "config", "--global", "--add", "safe.directory", path)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return errors.Wrapf(errors.ErrFail, err, "failed to mark directory as safe (output: %s)", string(output))
+// git names the repo top it refused, which is what safe.directory has to match when path is only a subdirectory,
+// the path isn't escaped on that line so it runs to the quote that ends the line
+func unsafeRepositoryPath(err error, path string) string {
+	_, rest, found := strings.Cut(err.Error(), "repository at '")
+	if !found {
+		return path
 	}
-
-	logger.Debug("Successfully marked directory as safe: %s", path)
-	return nil
+	line, _, _ := strings.Cut(rest, "\n")
+	top, ok := strings.CutSuffix(strings.TrimSuffix(line, "\r"), "'")
+	if !ok || top == "" {
+		return path
+	}
+	return top
 }
 
-// withSafeDirectoryRetry executes a function and retries once if it fails with unsafe repository error
-// Automatically marks the directory as safe before retrying
-func withSafeDirectoryRetry(path string, logger *logging.Logger, fn func() error) error {
-	err := fn()
-	if err != nil && isUnsafeRepositoryError(err) {
-		// Try to mark as safe and retry
-		if markErr := markDirectoryAsSafe(path, logger); markErr != nil {
-			// If we can't mark as safe, return original error
-			return err
-		}
-		// Retry the operation
-		return fn()
+// withSafeDirectoryRetry runs a git command, and if git refuses the repo for its ownership (common with Docker volumes)
+// runs it once more with the extra args, they trust that one repo for that one command so the user's global git config is never written
+func withSafeDirectoryRetry(path string, logger *logging.Logger, fn func(extraArgs []string) error) error {
+	err := fn(nil)
+	if err == nil || !isUnsafeRepositoryError(err) {
+		return err
 	}
-	return err
+	top := unsafeRepositoryPath(err, path)
+	logger.Debug("Git refused %s for its ownership, retrying with safe.directory set for this command only", top)
+	return fn([]string{"-c", "safe.directory=" + top})
 }
 
 // cloneWithGitCLI clones repositories using native git command.
