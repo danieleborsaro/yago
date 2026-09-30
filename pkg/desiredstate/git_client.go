@@ -3,10 +3,10 @@ package desiredstate
 
 import (
 	"fmt"
-	"os/exec"
 	"strings"
 
 	"github.com/danieleborsaro/yago/internal/utils/logging"
+	uRepo "github.com/danieleborsaro/yago/internal/utils/repo"
 )
 
 // GitClient handles Git operations for component version resolution
@@ -21,16 +21,16 @@ func NewGitClient() *GitClient {
 // Returns the commit SHA and any error encountered
 func (g *GitClient) ResolveRefToCommit(repoURL, ref string) (string, error) {
 	// Try to resolve using ls-remote (doesn't require cloning)
-	cmd := exec.Command("git", "ls-remote", repoURL, ref)
-	output, err := cmd.Output()
+	if err := uRepo.RejectOptionLike("ref", ref); err != nil {
+		return "", err
+	}
+	output, err := uRepo.LsRemote(nil, repoURL, ref)
 	if err != nil {
 		// Try with refs/heads/ prefix for branches
-		cmd = exec.Command("git", "ls-remote", repoURL, "refs/heads/"+ref)
-		output, err = cmd.Output()
+		output, err = uRepo.LsRemote(nil, repoURL, "refs/heads/"+ref)
 		if err != nil {
 			// Try with refs/tags/ prefix for tags
-			cmd = exec.Command("git", "ls-remote", repoURL, "refs/tags/"+ref)
-			output, err = cmd.Output()
+			output, err = uRepo.LsRemote(nil, repoURL, "refs/tags/"+ref)
 			if err != nil {
 				return "", fmt.Errorf("failed to resolve ref %s in repo %s: %w", ref, repoURL, err)
 			}

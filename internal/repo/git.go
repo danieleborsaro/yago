@@ -393,12 +393,11 @@ func (r *Repo) ValidateRemote() error {
 
 	// Use git ls-remote to check if remote is reachable
 	// This is lightweight and doesn't clone the repository
-	cmd := exec.Command("git", "ls-remote", "--heads", r.URL)
-	output, err := cmd.CombinedOutput()
+	_, err := uRepo.LsRemote([]string{"--heads"}, r.URL)
 
 	if err != nil {
 		// Parse the error to provide more helpful messages
-		errorMsg := string(output)
+		errorMsg := err.Error()
 
 		if strings.Contains(errorMsg, "not found") || strings.Contains(errorMsg, "does not exist") ||
 			strings.Contains(errorMsg, "could not read Username") {
@@ -413,7 +412,7 @@ func (r *Repo) ValidateRemote() error {
 		}
 
 		// Generic error
-		return errors.Newf(errors.ErrFail, "VALIDATION ERROR: remote repository not accessible: %s\nError: %v\nOutput: %s", r.URL, err, errorMsg)
+		return errors.Newf(errors.ErrFail, "VALIDATION ERROR: remote repository not accessible: %s\nError: %v", r.URL, err)
 	}
 
 	r.config.Logger.Debug("Remote repository validated successfully: %s", r.URL)
@@ -437,20 +436,17 @@ func (r *Repo) ValidateRef() error {
 
 	// Use git ls-remote to check if ref exists
 	// Try multiple formats: refs/heads/{ref}, refs/tags/{ref}, and direct ref
-	cmd := exec.Command("git", "ls-remote", r.URL, r.Ref)
-	output, err := cmd.CombinedOutput()
+	output, err := uRepo.LsRemote(nil, r.URL, r.Ref)
 
 	if err != nil {
-		errorMsg := string(output)
-		return errors.Newf(errors.ErrFail, "VALIDATION ERROR: failed to validate ref '%s' on %s\nError: %v\nOutput: %s", r.Ref, r.URL, err, errorMsg)
+		return errors.Newf(errors.ErrFail, "VALIDATION ERROR: failed to validate ref '%s' on %s\nError: %v", r.Ref, r.URL, err)
 	}
 
 	// Check if we got any output - empty output means ref doesn't exist
 	outputStr := strings.TrimSpace(string(output))
 	if outputStr == "" {
 		// Try checking as a branch
-		cmdBranch := exec.Command("git", "ls-remote", "--heads", r.URL, fmt.Sprintf("refs/heads/%s", r.Ref))
-		outputBranch, errBranch := cmdBranch.CombinedOutput()
+		outputBranch, errBranch := uRepo.LsRemote([]string{"--heads"}, r.URL, fmt.Sprintf("refs/heads/%s", r.Ref))
 
 		if errBranch == nil && strings.TrimSpace(string(outputBranch)) != "" {
 			r.config.Logger.Debug("Ref '%s' validated as branch on remote", r.Ref)
@@ -458,8 +454,7 @@ func (r *Repo) ValidateRef() error {
 		}
 
 		// Try checking as a tag
-		cmdTag := exec.Command("git", "ls-remote", "--tags", r.URL, fmt.Sprintf("refs/tags/%s", r.Ref))
-		outputTag, errTag := cmdTag.CombinedOutput()
+		outputTag, errTag := uRepo.LsRemote([]string{"--tags"}, r.URL, fmt.Sprintf("refs/tags/%s", r.Ref))
 
 		if errTag == nil && strings.TrimSpace(string(outputTag)) != "" {
 			r.config.Logger.Debug("Ref '%s' validated as tag on remote", r.Ref)
