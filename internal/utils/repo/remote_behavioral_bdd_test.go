@@ -27,6 +27,13 @@ func fakeGit(t *testing.T, body string) string {
 	return argsFile
 }
 
+func setTerminal(t *testing.T, attached bool) {
+	t.Helper()
+	old := hasTerminal
+	hasTerminal = func() bool { return attached }
+	t.Cleanup(func() { hasTerminal = old })
+}
+
 func readArgs(t *testing.T, argsFile string) []string {
 	t.Helper()
 	data, err := os.ReadFile(argsFile) //nolint:gosec // path comes from t.TempDir
@@ -101,14 +108,15 @@ func TestLsRemote_EndsOptionsBeforeURL_BehavioralBDD(t *testing.T) {
 
 func TestLsRemote_HungRemote_BehavioralBDD(t *testing.T) {
 	contract := BehavioralContract{
-		Behavior:        "ls-remote gives up on a remote that never answers",
-		CurrentImpl:     "LsRemote runs git under a context deadline",
+		Behavior:        "Without a terminal, ls-remote gives up on a remote that never answers",
+		CurrentImpl:     "LsRemote runs git under a context deadline when hasTerminal is false",
 		ExpectedOutcome: "A timed out error comes back soon after the deadline instead of hanging",
-		Rationale:       "An unreachable host or a credential prompt used to hang yago with no way out but ctrl c",
+		Rationale:       "In CI or a pipe an unreachable host used to hang yago with nobody there to press ctrl c",
 	}
 	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
 
-	// Given: a git that hangs, and a short deadline
+	// Given: no terminal, a git that hangs, and a short deadline
+	setTerminal(t, false)
 	fakeGit(t, "exec sleep 30")
 	old := lsRemoteTimeout
 	lsRemoteTimeout = 200 * time.Millisecond

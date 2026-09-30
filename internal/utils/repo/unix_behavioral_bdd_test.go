@@ -26,19 +26,36 @@ func readInt(t *testing.T, path string) int {
 	return n
 }
 
-func TestLsRemote_NeverPrompts_BehavioralBDD(t *testing.T) {
+// a git that records its prompt setting, its pid and its process group, then runs body
+func promptRecordingGit(t *testing.T, body string) (prompt, pid, pgid string) {
+	t.Helper()
+	dir := t.TempDir()
+	prompt, pid, pgid = filepath.Join(dir, "prompt"), filepath.Join(dir, "pid"), filepath.Join(dir, "pgid")
+	fakeGit(t, "printf '%s' \"$GIT_TERMINAL_PROMPT\" > '"+prompt+"'\necho $$ > '"+pid+"'\nps -o pgid= -p $$ > '"+pgid+"'\n"+body)
+	return prompt, pid, pgid
+}
+
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path) //nolint:gosec // path comes from t.TempDir
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(data)
+}
+
+func TestLsRemote_NoTerminalNeverPrompts_BehavioralBDD(t *testing.T) {
 	contract := BehavioralContract{
-		Behavior:        "ls-remote runs git with prompts off and in a session of its own",
-		CurrentImpl:     "LsRemote sets GIT_TERMINAL_PROMPT=0 and detachFromTerminal starts git with Setsid",
+		Behavior:        "Without a terminal, ls-remote runs git with prompts off and in a session of its own",
+		CurrentImpl:     "LsRemote sets GIT_TERMINAL_PROMPT=0 and isolateProcessGroup starts git with Setsid when hasTerminal is false",
 		ExpectedOutcome: "git sees GIT_TERMINAL_PROMPT=0 and leads its own process group",
-		Rationale:       "A killed git used to leave git-remote-https or ssh at a password prompt, reading the terminal with echo off",
+		Rationale:       "Nobody can answer a prompt without a terminal, and git needs a group of its own for a timeout to kill its helpers",
 	}
 	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
 
-	// Given: a git that records its prompt setting, its pid and its process group
-	dir := t.TempDir()
-	prompt, pid, pgid := filepath.Join(dir, "prompt"), filepath.Join(dir, "pid"), filepath.Join(dir, "pgid")
-	fakeGit(t, "printf '%s' \"$GIT_TERMINAL_PROMPT\" > '"+prompt+"'\necho $$ > '"+pid+"'\nps -o pgid= -p $$ > '"+pgid+"'")
+	// Given: no terminal, and a git that records how it was started
+	setTerminal(t, false)
+	prompt, pid, pgid := promptRecordingGit(t, "")
 
 	// When: ls-remote runs
 	if _, err := LsRemote(nil, "https://example.com/foo/bar.git"); err != nil {
@@ -46,25 +63,57 @@ func TestLsRemote_NeverPrompts_BehavioralBDD(t *testing.T) {
 	}
 
 	// Then: prompts are off and git is its own group's leader
-	data, err := os.ReadFile(prompt) //nolint:gosec // path comes from t.TempDir
-	if err != nil || string(data) != "0" {
-		t.Errorf("GIT_TERMINAL_PROMPT = %q, %v, want 0", data, err)
+	if got := readFile(t, prompt); got != "0" {
+		t.Errorf("GIT_TERMINAL_PROMPT = %q, want 0", got)
 	}
 	if gotPid, gotPgid := readInt(t, pid), readInt(t, pgid); gotPid != gotPgid {
 		t.Errorf("git ran as %d in process group %d, want a group of its own", gotPid, gotPgid)
 	}
 }
 
-func TestLsRemote_KillsLeftoverChildren_BehavioralBDD(t *testing.T) {
+func TestLsRemote_TerminalLetsGitPrompt_BehavioralBDD(t *testing.T) {
 	contract := BehavioralContract{
-		Behavior:        "A timed out ls-remote takes the helpers git started with it",
-		CurrentImpl:     "detachFromTerminal cancels by killing git's whole process group",
-		ExpectedOutcome: "The child still holding git's output is gone soon after the timeout",
-		Rationale:       "ssh or git-remote-https outliving a killed git kept running, holding the pipes or the terminal",
+		Behavior:        "In a terminal, ls-remote lets git prompt with no deadline, in yago's own process group",
+		CurrentImpl:     "LsRemote leaves GIT_TERMINAL_PROMPT, the process group and the deadline alone when hasTerminal is true",
+		ExpectedOutcome: "git runs past the deadline without being killed, with prompts left on and in yago's process group",
+		Rationale:       "Someone typing a password or passphrase mustn't be cut off, and ctrl c has to reach git and its helpers",
 	}
 	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
 
-	// Given: a git that hangs with a child holding its output, the way ssh outlives a killed git, and a short deadline
+	// Given: a terminal, a git that records how it was started and takes longer than a short deadline
+	setTerminal(t, true)
+	t.Setenv("GIT_TERMINAL_PROMPT", "")
+	prompt, _, pgid := promptRecordingGit(t, "sleep 1")
+	old := lsRemoteTimeout
+	lsRemoteTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { lsRemoteTimeout = old })
+
+	// When: ls-remote runs
+	_, err := LsRemote(nil, "https://example.com/foo/bar.git")
+
+	// Then: it wasn't cut off, prompts were left on and git shared yago's process group
+	if err != nil {
+		t.Fatalf("LsRemote: %v", err)
+	}
+	if got := readFile(t, prompt); got == "0" {
+		t.Errorf("GIT_TERMINAL_PROMPT = %q, want prompts left on", got)
+	}
+	if got := readInt(t, pgid); got != syscall.Getpgrp() {
+		t.Errorf("git ran in process group %d, want yago's %d so ctrl c reaches it", got, syscall.Getpgrp())
+	}
+}
+
+func TestLsRemote_KillsLeftoverChildren_BehavioralBDD(t *testing.T) {
+	contract := BehavioralContract{
+		Behavior:        "Without a terminal, a timed out ls-remote takes the helpers git started with it",
+		CurrentImpl:     "isolateProcessGroup cancels by killing git's whole process group",
+		ExpectedOutcome: "The child still holding git's output is gone soon after the timeout",
+		Rationale:       "ssh or git-remote-https outliving a killed git kept running and held its output",
+	}
+	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
+
+	// Given: no terminal, a git that hangs with a child holding its output, the way ssh outlives a killed git, and a short deadline
+	setTerminal(t, false)
 	child := filepath.Join(t.TempDir(), "child")
 	fakeGit(t, "sleep 30 &\necho $! > '"+child+"'\nwait")
 	old := lsRemoteTimeout

@@ -9,9 +9,9 @@ import (
 	"syscall"
 )
 
-// with no terminal a prompt from git or ssh fails straight away, and a timeout kills the helpers git started too,
-// otherwise a killed git leaves git-remote-https or ssh reading the terminal with echo off
-func detachFromTerminal(cmd *exec.Cmd) {
+// a session of its own so a timeout kills the helpers git started too, a killed git used to leave ssh or
+// git-remote-https running and holding its output
+func isolateProcessGroup(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	cmd.Cancel = func() error {
 		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)

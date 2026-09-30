@@ -9,10 +9,16 @@ import (
 	"time"
 
 	"github.com/danieleborsaro/yago/internal/utils/errors"
+	"github.com/mattn/go-isatty"
 )
 
-// an unreachable host would otherwise hang yago forever
+// without a terminal an unreachable host would otherwise hang yago forever
 var lsRemoteTimeout = 60 * time.Second
+
+// swapped in tests, which may or may not run in a terminal
+var hasTerminal = func() bool {
+	return isatty.IsTerminal(os.Stdin.Fd()) || isatty.IsCygwinTerminal(os.Stdin.Fd())
+}
 
 // RejectOptionLike refuses values from yaml that git would read as an option, the upload pack one runs any command it's given
 func RejectOptionLike(kind, value string) error {
@@ -37,12 +43,20 @@ func LsRemote(flags []string, url string, patterns ...string) ([]byte, error) {
 	args = append(args, "--", url)
 	args = append(args, patterns...)
 
-	ctx, cancel := context.WithTimeout(context.Background(), lsRemoteTimeout)
+	// in a terminal git asks for credentials like it always has, with no deadline to cut someone off mid password,
+	// and ctrl c stops it with its helpers, without one nobody can answer, so it fails fast and a deadline stops a
+	// host that never answers
+	interactive := hasTerminal()
+	ctx, cancel := context.Background(), context.CancelFunc(func() {})
+	if !interactive {
+		ctx, cancel = context.WithTimeout(ctx, lsRemoteTimeout)
+	}
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", args...) //nolint:gosec // only ever git, no shell, and the options end before any yaml value
-	// ls-remote only checks a remote, so a missing credential fails it rather than waiting on someone to type it
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
-	detachFromTerminal(cmd)
+	if !interactive {
+		cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+		isolateProcessGroup(cmd)
+	}
 	// where the whole group can't be killed, a helper like ssh can outlive git and keep the pipes open
 	cmd.WaitDelay = time.Second
 	var stdout, stderr bytes.Buffer
