@@ -7,8 +7,9 @@ import (
 	"syscall"
 )
 
+// lstat like git, so a .git symlink belongs to whoever made the link, not to what it points at
 func lookupOwner(path string) (uint32, bool) {
-	info, err := os.Stat(path)
+	info, err := os.Lstat(path)
 	if err != nil {
 		return 0, false
 	}

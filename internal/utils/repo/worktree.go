@@ -109,24 +109,34 @@ func headOf(top string) Head {
 
 // empty when path isn't in a git repository
 func worktreeTop(path string) (string, error) {
-	dir, err := filepath.Abs(path)
+	pointedAt, err := filepath.Abs(path)
 	if err != nil {
 		return "", err
 	}
+	dir := pointedAt
 	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
 		dir = filepath.Dir(dir)
 	}
-	top, err := gitOutput(dir, "rev-parse", "--show-toplevel")
+	// a file that isn't there yet can't vouch for anything, its folder does instead
+	if !fileExists(pointedAt) {
+		pointedAt = dir
+	}
+	top, err := gitOutputFrom(pointedAt, dir, "rev-parse", "--show-toplevel")
 	if err != nil && strings.Contains(err.Error(), "not a git repository") {
 		return "", nil
 	}
 	return top, err
 }
 
-// git's messages are matched on, so they're asked for in english
 func gitOutput(dir string, args ...string) (string, error) {
+	return gitOutputFrom(dir, dir, args...)
+}
+
+// pointedAt is what yago was pointed at, it decides whether a repo git refuses for its owner gets trusted, and
+// git's messages are matched on, so they're asked for in english
+func gitOutputFrom(pointedAt, dir string, args ...string) (string, error) {
 	var out string
-	err := withSafeDirectoryRetry(dir, logging.NewLogger(logging.INFO), func(extraArgs []string) error {
+	err := withSafeDirectoryRetry(pointedAt, logging.NewLogger(logging.INFO), func(extraArgs []string) error {
 		cmd := exec.Command("git", slices.Concat(extraArgs, []string{"-C", dir}, args)...) //nolint:gosec // only ever git, and no shell is involved
 		cmd.Env = append(os.Environ(), "LC_ALL=C")
 		var stdout, stderr bytes.Buffer

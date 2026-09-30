@@ -86,60 +86,74 @@ func isUnsafeRepositoryError(err error) bool {
 		strings.Contains(errMsg, "dubious ownership")
 }
 
-// git names the repo top it refused, which is what safe.directory has to match when path is only a subdirectory,
-// the path isn't escaped on that line so it runs to the quote that ends the line
-func unsafeRepositoryPath(err error, path string) string {
-	_, rest, found := strings.Cut(err.Error(), "repository at '")
-	if !found {
-		return path
+// git names the repo top it refused, which is what safe.directory has to match, older git words it as an unsafe
+// repository, and neither escapes the path, so it runs to where the quote closes on that line
+func unsafeRepositoryPath(err error) (string, bool) {
+	for _, form := range []struct{ open, close string }{
+		{"repository at '", "'"},
+		{"unsafe repository ('", "' is owned by someone else)"},
+	} {
+		_, rest, found := strings.Cut(err.Error(), form.open)
+		if !found {
+			continue
+		}
+		line, _, _ := strings.Cut(rest, "\n")
+		if top, ok := strings.CutSuffix(strings.TrimSuffix(line, "\r"), form.close); ok && top != "" {
+			return top, true
+		}
 	}
-	line, _, _ := strings.Cut(rest, "\n")
-	top, ok := strings.CutSuffix(strings.TrimSuffix(line, "\r"), "'")
-	if !ok || top == "" {
-		return path
-	}
-	return top
+	return "", false
 }
 
 // swapped in tests, another owner can't be made without root
 var fileOwner = lookupOwner
 
-// trusts the repo yago was pointed at, or one further up whose .git has the same owner as the folder yago was
-// pointed at, so a repo someone else made above it, like /tmp/.git, still gets git's refusal
-func trustedRepository(path, top string) bool {
-	pathInfo, err := os.Stat(path)
-	if err != nil {
-		return false
-	}
-	if topInfo, err := os.Stat(top); err == nil && os.SameFile(pathInfo, topInfo) {
-		return true
-	}
-	gitDir := filepath.Join(top, ".git")
-	if _, err := os.Stat(gitDir); err != nil {
-		gitDir = top
-	}
-	pathOwner, ok := fileOwner(path)
+// the repo and its .git need the owner of what yago was pointed at, the way git checks them against the current
+// user, so a file sitting in /tmp never vouches for someone else's /tmp/.git
+func trustedRepository(pointedAt, top string) bool {
+	owner, ok := fileOwner(pointedAt)
 	if !ok {
 		return false
 	}
-	gitOwner, ok := fileOwner(gitDir)
-	return ok && pathOwner == gitOwner
+	entries := []string{top}
+	if gitDir := filepath.Join(top, ".git"); fileExists(gitDir) {
+		entries = append(entries, gitDir)
+	}
+	for _, entry := range entries {
+		if entryOwner, ok := fileOwner(entry); !ok || entryOwner != owner {
+			return false
+		}
+	}
+	return true
+}
+
+func fileExists(path string) bool {
+	_, err := os.Lstat(path)
+	return err == nil
 }
 
 // withSafeDirectoryRetry runs a git command, and if git refuses the repo for its ownership (common with Docker volumes)
 // runs it once more with the extra args, they trust that one repo for that one command so the user's global git config is never written
-func withSafeDirectoryRetry(path string, logger *logging.Logger, fn func(extraArgs []string) error) error {
+func withSafeDirectoryRetry(pointedAt string, logger *logging.Logger, fn func(extraArgs []string) error) error {
 	err := fn(nil)
 	if err == nil || !isUnsafeRepositoryError(err) {
 		return err
 	}
-	top := unsafeRepositoryPath(err, path)
-	if !trustedRepository(path, top) {
-		logger.Debug("Git refused %s for its ownership, and it isn't trusted since %s has another owner", top, path)
+	top, found := unsafeRepositoryPath(err)
+	if !found {
+		return err
+	}
+	if !trustedRepository(pointedAt, top) {
+		logger.Debug("Git refused %s for its ownership, and it isn't trusted since %s has another owner", top, pointedAt)
 		return err
 	}
 	logger.Debug("Git refused %s for its ownership, retrying with safe.directory set for this command only", top)
-	return fn([]string{"-c", "safe.directory=" + top})
+	retryErr := fn([]string{"-c", "safe.directory=" + top})
+	if isUnsafeRepositoryError(retryErr) {
+		// git before 2.38 only reads safe.directory from the system and global config
+		return errors.Wrapf(errors.ErrFail, retryErr, "git still refused %s, trusting it for one command needs git 2.38 or later", top)
+	}
+	return retryErr
 }
 
 // cloneWithGitCLI clones repositories using native git command.

@@ -2,14 +2,18 @@ package repo
 
 import (
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/danieleborsaro/yago/internal/utils/logging"
 )
 
-// a repo with one commit on main and feature and an empty sub folder, named by the caller so its path can hold
-// awkward characters
+// named by the caller so its path can hold awkward characters, like a quote
 func newNamedRepo(t *testing.T, name string) (root, mainHash string) {
 	t.Helper()
 	root = filepath.Join(t.TempDir(), name)
@@ -23,14 +27,27 @@ func newNamedRepo(t *testing.T, name string) (root, mainHash string) {
 }
 
 // git then treats every repo as owned by someone else, so set it up after any fixture is built
-func assumeDifferentOwner(t *testing.T) (globalConfig string) {
+func assumeDifferentOwner(t *testing.T, root string) (globalConfig string) {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("yago can't compare owners on windows, so it never trusts a repo git refused there")
+	}
 	globalConfig = filepath.Join(t.TempDir(), "gitconfig")
 	if err := os.WriteFile(globalConfig, nil, 0o600); err != nil {
 		t.Fatalf("write global config: %v", err)
 	}
 	t.Setenv("GIT_CONFIG_GLOBAL", globalConfig)
+	// GitHub's runners trust every repo in their system config, and config passed in the environment counts too
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_CONFIG_COUNT", "0")
+	t.Setenv("GIT_CONFIG_PARAMETERS", "")
 	t.Setenv("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+
+	// a git that never refuses would let these tests pass without the retry ever running
+	out, err := exec.Command("git", "-C", root, "rev-parse", "--show-toplevel").CombinedOutput()
+	if err == nil || !isUnsafeRepositoryError(errors.New(string(out))) {
+		t.Fatalf("git didn't refuse %s for its owner, so nothing here would be tested: %v %s", root, err, out)
+	}
 	return globalConfig
 }
 
@@ -67,9 +84,9 @@ func TestSafeDirectory_LeavesGlobalConfigAlone_BehavioralBDD(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Given: a repo git treats as owned by someone else, and an empty global config
+			// Given: a repo git refuses for its owner, and an empty global config
 			root, mainHash := newNamedRepo(t, tt.repo)
-			globalConfig := assumeDifferentOwner(t)
+			globalConfig := assumeDifferentOwner(t, root)
 
 			// When: feature is checked out from the root or the subdirectory, the way a promotion does
 			path := filepath.Join(root, tt.dir)
@@ -91,91 +108,142 @@ func TestSafeDirectory_LeavesGlobalConfigAlone_BehavioralBDD(t *testing.T) {
 	}
 }
 
-func TestSafeDirectory_RepoAboveWithAnotherOwner_BehavioralBDD(t *testing.T) {
+func TestSafeDirectory_OwnersDecideTrust_BehavioralBDD(t *testing.T) {
 	contract := BehavioralContract{
-		Behavior:        "A repo above the folder yago was pointed at is only trusted when its .git has the folder's owner",
-		CurrentImpl:     "trustedRepository compares the owners before withSafeDirectoryRetry sets safe.directory",
-		ExpectedOutcome: "Pointing at the repo itself still works, a folder inside a repo with another owner gets git's refusal back",
-		Rationale:       "Trusting whatever repo git found further up, like someone else's /tmp/.git, would run its hooks and fsmonitor as the user, which safe.directory is there to stop",
+		Behavior:        "A repo git refuses is only trusted when it and its .git have the owner of what yago was pointed at",
+		CurrentImpl:     "trustedRepository compares the owner of the pointed at file or folder with the repo top and its .git before withSafeDirectoryRetry sets safe.directory",
+		ExpectedOutcome: "One owner throughout is trusted, any other owner on the repo or its .git gets git's refusal back",
+		Rationale:       "Trusting whatever repo git found, like someone else's /tmp/.git above a file sitting in /tmp, would run its hooks and fsmonitor as the user, which safe.directory is there to stop",
 	}
 	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
 
-	// Given: a repo git treats as owned by someone else, with its .git owned by another user than its folders
-	root, mainHash := newNamedRepo(t, "repo")
-	globalConfig := assumeDifferentOwner(t)
-	old := fileOwner
-	fileOwner = func(path string) (uint32, bool) {
-		if filepath.Base(path) == ".git" {
-			return 2, true
-		}
-		return 1, true
+	tests := []struct {
+		name    string
+		point   string
+		owners  map[string]uint32
+		trusted bool
+	}{
+		{name: "the repo itself with one owner", owners: map[string]uint32{"repo": 1, ".git": 1}, trusted: true},
+		{name: "a folder inside with one owner", point: "sub", owners: map[string]uint32{"repo": 1, "sub": 1, ".git": 1}, trusted: true},
+		{name: "a file inside with one owner", point: "ds.yaml", owners: map[string]uint32{"repo": 1, "ds.yaml": 1, ".git": 1}, trusted: true},
+		{name: "the repo itself when its .git has another owner", owners: map[string]uint32{"repo": 1, ".git": 2}},
+		{name: "a folder inside when the .git has another owner", point: "sub", owners: map[string]uint32{"repo": 1, "sub": 1, ".git": 2}},
+		{name: "a file sitting in a folder someone else owns, like /tmp", point: "ds.yaml", owners: map[string]uint32{"repo": 0, "ds.yaml": 1, ".git": 2}},
+		{name: "a file whose owner doesn't own the repo", point: "ds.yaml", owners: map[string]uint32{"repo": 2, "ds.yaml": 1, ".git": 2}},
 	}
-	t.Cleanup(func() { fileOwner = old })
 
-	t.Run("subdirectory", func(t *testing.T) {
-		// When: the head is read from a folder inside the repo
-		_, err := WorktreeHead(filepath.Join(root, "sub"))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Given: a repo git refuses for its owner, with the owners faked by name
+			root, mainHash := newNamedRepo(t, "repo")
+			if err := os.WriteFile(filepath.Join(root, "ds.yaml"), nil, 0o600); err != nil {
+				t.Fatalf("write ds.yaml: %v", err)
+			}
+			globalConfig := assumeDifferentOwner(t, root)
+			old := fileOwner
+			fileOwner = func(path string) (uint32, bool) {
+				owner, ok := tt.owners[filepath.Base(path)]
+				return owner, ok
+			}
+			t.Cleanup(func() { fileOwner = old })
 
-		// Then: git's refusal comes back and the global config is untouched
-		if err == nil || !strings.Contains(err.Error(), "dubious ownership") {
-			t.Fatalf("WorktreeHead error = %v, want git's ownership refusal", err)
-		}
-		assertEmptyFile(t, globalConfig)
+			// When: the head is read through what yago was pointed at
+			head, err := WorktreeHead(filepath.Join(root, tt.point))
+
+			// Then: the repo is read when trusted, otherwise git's refusal comes back, and the global config is untouched
+			if tt.trusted {
+				if err != nil {
+					t.Fatalf("WorktreeHead: %v", err)
+				}
+				if head.Branch != "main" || head.Commit != mainHash {
+					t.Errorf("head = %s, want main at %s", head, mainHash)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), "dubious ownership") {
+				t.Fatalf("WorktreeHead error = %v, want git's ownership refusal", err)
+			}
+			assertEmptyFile(t, globalConfig)
+		})
+	}
+}
+
+func TestSafeDirectory_OldGitIgnoresTheRetry_BehavioralBDD(t *testing.T) {
+	contract := BehavioralContract{
+		Behavior:        "When git still refuses a trusted repo after the one command retry, yago says which git it needs",
+		CurrentImpl:     "withSafeDirectoryRetry wraps a second refusal with the git version that honours -c safe.directory",
+		ExpectedOutcome: "The command ran twice, the second time with safe.directory set, and the error names git 2.38",
+		Rationale:       "git before 2.38 ignores safe.directory given with -c, and yago no longer writes it to the global config",
+	}
+	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
+	if runtime.GOOS == "windows" {
+		t.Skip("yago can't compare owners on windows, so it never retries there")
+	}
+
+	// Given: a repo folder the current user owns, and a git that refuses it whatever it's told
+	dir := t.TempDir()
+	refusal := fmt.Errorf("fatal: detected dubious ownership in repository at '%s'", dir)
+	var calls [][]string
+
+	// When: a command runs through the retry
+	err := withSafeDirectoryRetry(dir, logging.NewLogger(logging.ERROR), func(extraArgs []string) error {
+		calls = append(calls, extraArgs)
+		return refusal
 	})
 
-	t.Run("root", func(t *testing.T) {
-		// When: the head is read from the repo itself
-		head, err := WorktreeHead(root)
-
-		// Then: pointing at it is enough to trust it
-		if err != nil {
-			t.Fatalf("WorktreeHead: %v", err)
-		}
-		if head.Branch != "main" || head.Commit != mainHash {
-			t.Errorf("head = %s, want main at %s", head, mainHash)
-		}
-		assertEmptyFile(t, globalConfig)
-	})
+	// Then: it was retried once with safe.directory, and the error says git 2.38 is needed
+	if len(calls) != 2 || strings.Join(calls[1], " ") != "-c safe.directory="+dir {
+		t.Errorf("calls = %q, want a plain run then one with -c safe.directory=%s", calls, dir)
+	}
+	if err == nil || !strings.Contains(err.Error(), "git 2.38") {
+		t.Errorf("error = %v, want it to name git 2.38", err)
+	}
 }
 
 func TestSafeDirectory_RepoPathFromGitsMessage_BehavioralBDD(t *testing.T) {
 	contract := BehavioralContract{
-		Behavior:        "The repo to trust is read from the first line of git's refusal",
-		CurrentImpl:     "unsafeRepositoryPath takes everything between the opening quote and the quote that ends the line",
-		ExpectedOutcome: "Quotes inside the path are kept, and a message it can't read falls back to the folder yago was pointed at",
+		Behavior:        "The repo to trust is read from the first line of git's refusal, in either wording",
+		CurrentImpl:     "unsafeRepositoryPath takes everything between the opening quote and where the quote closes on that line",
+		ExpectedOutcome: "Quotes inside the path are kept, and a message it can't read gives no path so nothing is retried",
 		Rationale:       "git doesn't escape the path on that line, so stopping at the first quote trusted the wrong folder",
 	}
 	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
 
 	tests := []struct {
-		name string
-		msg  string
-		want string
+		name  string
+		msg   string
+		want  string
+		found bool
 	}{
 		{
-			name: "quote in the path",
-			msg:  "git rev-parse --show-toplevel: exit status 128: fatal: detected dubious ownership in repository at '/work/team's-repo'\nTo add an exception for this directory, call:",
-			want: "/work/team's-repo",
+			name:  "quote in the path",
+			msg:   "git rev-parse --show-toplevel: exit status 128: fatal: detected dubious ownership in repository at '/work/team's-repo'\nTo add an exception for this directory, call:",
+			want:  "/work/team's-repo",
+			found: true,
 		},
 		{
-			name: "only line",
-			msg:  "fatal: detected dubious ownership in repository at '/work/repo'",
-			want: "/work/repo",
+			name:  "only line",
+			msg:   "fatal: detected dubious ownership in repository at '/work/repo'",
+			want:  "/work/repo",
+			found: true,
 		},
 		{
-			name: "windows line ending",
-			msg:  "fatal: detected dubious ownership in repository at '/work/repo'\r\nTo add an exception for this directory, call:",
-			want: "/work/repo",
+			name:  "windows line ending",
+			msg:   "fatal: detected dubious ownership in repository at '/work/repo'\r\nTo add an exception for this directory, call:",
+			want:  "/work/repo",
+			found: true,
 		},
 		{
-			name: "older git wording",
-			msg:  "fatal: unsafe repository ('/work/repo' is owned by someone else)",
-			want: "/pointed/at",
+			name:  "older git wording with a quote in the path",
+			msg:   "fatal: unsafe repository ('/work/team's-repo' is owned by someone else)\nTo add an exception for this directory, call:",
+			want:  "/work/team's-repo",
+			found: true,
 		},
 		{
 			name: "no closing quote",
 			msg:  "fatal: detected dubious ownership in repository at '/work/repo",
-			want: "/pointed/at",
+		},
+		{
+			name: "no path at all",
+			msg:  "fatal: detected dubious ownership",
 		},
 	}
 
@@ -185,11 +253,11 @@ func TestSafeDirectory_RepoPathFromGitsMessage_BehavioralBDD(t *testing.T) {
 			err := errors.New(tt.msg)
 
 			// When: the repo path is read from it
-			got := unsafeRepositoryPath(err, "/pointed/at")
+			got, found := unsafeRepositoryPath(err)
 
-			// Then: it's the whole path git named, or the folder yago was pointed at
-			if got != tt.want {
-				t.Errorf("unsafeRepositoryPath = %q, want %q", got, tt.want)
+			// Then: it's the whole path git named, or nothing
+			if got != tt.want || found != tt.found {
+				t.Errorf("unsafeRepositoryPath = %q, %v, want %q, %v", got, found, tt.want, tt.found)
 			}
 		})
 	}
