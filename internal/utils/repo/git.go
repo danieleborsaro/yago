@@ -120,6 +120,9 @@ func withSafeDirectoryRetry(path string, logger *logging.Logger, fn func() error
 // cloneWithGitCLI clones repositories using native git command.
 // This delegates all auth/transport behavior to the host environment and git configuration.
 func cloneWithGitCLI(url, path, branch string, bare, mirror bool, logger *logging.Logger) error {
+	if err := RejectOptionLike("repository URL", url); err != nil {
+		return err
+	}
 	args := []string{"-c", "color.ui=always", "clone", "--progress"}
 
 	if mirror {
@@ -132,7 +135,7 @@ func cloneWithGitCLI(url, path, branch string, bare, mirror bool, logger *loggin
 		args = append(args, "--branch", branch, "--single-branch")
 	}
 
-	args = append(args, url, path)
+	args = append(args, "--", url, path)
 
 	logger.Info("Cloning repository with native git: git %s", strings.Join(args, " "))
 	cmd := exec.Command("git", args...)

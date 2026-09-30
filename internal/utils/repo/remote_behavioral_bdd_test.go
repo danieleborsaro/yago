@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/danieleborsaro/yago/internal/utils/logging"
 )
 
 // puts a fake git first on PATH that writes its args one per line to the returned file, then runs body
@@ -151,4 +153,49 @@ func TestLsRemote_LocalRemote_BehavioralBDD(t *testing.T) {
 	if strings.TrimSpace(string(missing)) != "" {
 		t.Errorf("ls-remote for a missing ref = %q, want nothing", missing)
 	}
+}
+
+func TestCloneWithGitCLI_OptionLikeURL_BehavioralBDD(t *testing.T) {
+	contract := BehavioralContract{
+		Behavior:        "The native git clone ends options before the URL and path",
+		CurrentImpl:     "cloneWithGitCLI refuses a dash led URL and passes -- <url> <path>",
+		ExpectedOutcome: "A dash led URL never reaches git, and a normal clone gets -- before the URL",
+		Rationale:       "git clone --upload-pack=<cmd> runs <cmd>, and the URL comes from yaml",
+	}
+	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
+	logger := logging.NewLogger(logging.ERROR)
+
+	t.Run("dash led url", func(t *testing.T) {
+		// Given: a git on PATH that records whether it ran
+		argsFile := fakeGit(t, "exit 0")
+
+		// When: the url is an option
+		err := cloneWithGitCLI("--upload-pack=touch pwned", t.TempDir(), "", false, false, logger)
+
+		// Then: it's refused before git starts
+		if err == nil || !strings.Contains(err.Error(), "can't start with a dash") {
+			t.Fatalf("cloneWithGitCLI error = %v, want a dash refusal", err)
+		}
+		if _, statErr := os.Stat(argsFile); !os.IsNotExist(statErr) {
+			t.Errorf("git ran with %v, it should never have started", readArgs(t, argsFile))
+		}
+	})
+
+	t.Run("normal url", func(t *testing.T) {
+		// Given: a git on PATH that records its args
+		argsFile := fakeGit(t, "exit 0")
+		dest := filepath.Join(t.TempDir(), "bar")
+
+		// When: a branch is cloned
+		if err := cloneWithGitCLI("https://example.com/foo/bar.git", dest, "main", false, false, logger); err != nil {
+			t.Fatalf("cloneWithGitCLI: %v", err)
+		}
+
+		// Then: the url and path come after the end of options
+		args := readArgs(t, argsFile)
+		tail := strings.Join(args[len(args)-3:], " ")
+		if want := "-- https://example.com/foo/bar.git " + dest; tail != want {
+			t.Errorf("git args end with %q, want %q", tail, want)
+		}
+	})
 }
