@@ -15,7 +15,7 @@ func TestRepoValidation_OptionLikeValues_BehavioralBDD(t *testing.T) {
 		Behavior:        "Repo validation refuses a URL or ref from yaml that git would read as an option",
 		CurrentImpl:     "ValidateRemote and ValidateRef go through uRepo.LsRemote",
 		ExpectedOutcome: "A validation error comes back and nothing the value names gets run",
-		Rationale:       "git ls-remote --upload-pack=<cmd> runs <cmd>, the URL and ref come from desired state yaml",
+		Rationale:       "git ls-remote --upload-pack=<cmd> runs <cmd> when a dash led URL from desired state yaml lands where git reads options, and refs from the same yaml are refused the same way",
 	}
 	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
 

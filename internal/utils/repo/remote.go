@@ -3,6 +3,7 @@ package repo
 import (
 	"bytes"
 	"context"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -10,7 +11,7 @@ import (
 	"github.com/danieleborsaro/yago/internal/utils/errors"
 )
 
-// an unreachable host or a credential prompt would otherwise hang yago forever
+// an unreachable host would otherwise hang yago forever
 var lsRemoteTimeout = 60 * time.Second
 
 // RejectOptionLike refuses values from yaml that git would read as an option, the upload pack one runs any command it's given
@@ -39,7 +40,10 @@ func LsRemote(flags []string, url string, patterns ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), lsRemoteTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", args...) //nolint:gosec // only ever git, no shell, and the options end before any yaml value
-	// ssh can outlive a killed git and keep the pipes open
+	// ls-remote only checks a remote, so a missing credential fails it rather than waiting on someone to type it
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	detachFromTerminal(cmd)
+	// where the whole group can't be killed, a helper like ssh can outlive git and keep the pipes open
 	cmd.WaitDelay = time.Second
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr

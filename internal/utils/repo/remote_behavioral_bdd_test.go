@@ -3,6 +3,7 @@ package repo
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +14,9 @@ import (
 // puts a fake git first on PATH that writes its args one per line to the returned file, then runs body
 func fakeGit(t *testing.T, body string) string {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the fake git is a shell script")
+	}
 	dir := t.TempDir()
 	argsFile := filepath.Join(dir, "args")
 	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > '" + argsFile + "'\n" + body + "\n"
@@ -98,14 +102,14 @@ func TestLsRemote_EndsOptionsBeforeURL_BehavioralBDD(t *testing.T) {
 func TestLsRemote_HungRemote_BehavioralBDD(t *testing.T) {
 	contract := BehavioralContract{
 		Behavior:        "ls-remote gives up on a remote that never answers",
-		CurrentImpl:     "LsRemote runs git under a context deadline with a WaitDelay for leftover children",
+		CurrentImpl:     "LsRemote runs git under a context deadline",
 		ExpectedOutcome: "A timed out error comes back soon after the deadline instead of hanging",
 		Rationale:       "An unreachable host or a credential prompt used to hang yago with no way out but ctrl c",
 	}
 	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
 
 	// Given: a git that hangs, and a short deadline
-	fakeGit(t, "sleep 30")
+	fakeGit(t, "exec sleep 30")
 	old := lsRemoteTimeout
 	lsRemoteTimeout = 200 * time.Millisecond
 	t.Cleanup(func() { lsRemoteTimeout = old })
@@ -153,6 +157,48 @@ func TestLsRemote_LocalRemote_BehavioralBDD(t *testing.T) {
 	if strings.TrimSpace(string(missing)) != "" {
 		t.Errorf("ls-remote for a missing ref = %q, want nothing", missing)
 	}
+}
+
+func TestLsRemote_KeepsStderrOutOfOutput_BehavioralBDD(t *testing.T) {
+	contract := BehavioralContract{
+		Behavior:        "ls-remote returns only what git lists on stdout, and git's stderr only in the error",
+		CurrentImpl:     "LsRemote gives git separate stdout and stderr buffers",
+		ExpectedOutcome: "A warning on a successful run stays out of the output, and a failure's message is in the error",
+		Rationale:       "ValidateRef reads any output as a found ref, and git warns on stderr when a remote redirects even when the ref is missing, ValidateRemote matches on the failure's message",
+	}
+	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
+
+	t.Run("warning on success", func(t *testing.T) {
+		// Given: a git that lists a ref and warns about a redirect
+		fakeGit(t, "printf '123456789012\\trefs/heads/main\\n'\necho 'warning: redirecting to https://example.com/foo/baz.git/' >&2")
+
+		// When: ls-remote runs
+		out, err := LsRemote(nil, "https://example.com/foo/bar.git", "refs/heads/main")
+
+		// Then: the output is only the listed ref
+		if err != nil {
+			t.Fatalf("LsRemote: %v", err)
+		}
+		if string(out) != "123456789012\trefs/heads/main\n" {
+			t.Errorf("output = %q, want only the listed ref", out)
+		}
+	})
+
+	t.Run("failure", func(t *testing.T) {
+		// Given: a git that can't find the repository
+		fakeGit(t, "echo 'fatal: repository not found' >&2\nexit 128")
+
+		// When: ls-remote runs
+		out, err := LsRemote(nil, "https://example.com/foo/bar.git")
+
+		// Then: there's no output and git's message is in the error
+		if err == nil || !strings.Contains(err.Error(), "repository not found") {
+			t.Fatalf("LsRemote error = %v, want git's message in it", err)
+		}
+		if len(out) != 0 {
+			t.Errorf("output = %q, want none", out)
+		}
+	})
 }
 
 func TestCloneWithGitCLI_OptionLikeURL_BehavioralBDD(t *testing.T) {

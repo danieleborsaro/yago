@@ -14,7 +14,7 @@ func TestGitClientResolve_OptionLikeValues_BehavioralBDD(t *testing.T) {
 		Behavior:        "Resolving a component ref refuses a URL or ref that git would read as an option",
 		CurrentImpl:     "GitClient.ResolveRefToCommit checks the ref, then goes through uRepo.LsRemote",
 		ExpectedOutcome: "An error comes back before any ls-remote runs",
-		Rationale:       "Component URLs and refs come from desired state yaml, and git ls-remote --upload-pack=<cmd> runs <cmd>",
+		Rationale:       "git ls-remote --upload-pack=<cmd> runs <cmd> when a dash led component URL lands where git reads options, and refs from the same yaml are refused the same way",
 	}
 	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
 

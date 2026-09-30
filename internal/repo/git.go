@@ -404,7 +404,8 @@ func (r *Repo) ValidateRemote() error {
 			// GitHub returns an ambiguous credential prompt over HTTPS for both private and non-existent repos.
 			return errors.Newf(errors.ErrFail, "VALIDATION ERROR: repository not found: %s\nPlease verify the URL is correct and you have access", r.URL)
 		}
-		if strings.Contains(errorMsg, "Permission denied") || strings.Contains(errorMsg, "Authentication failed") {
+		if strings.Contains(errorMsg, "Permission denied") || strings.Contains(errorMsg, "Authentication failed") ||
+			strings.Contains(errorMsg, "could not read Password") {
 			return errors.Newf(errors.ErrFail, "VALIDATION ERROR: authentication failed for: %s\nPlease check your SSH keys or credentials", r.URL)
 		}
 		if strings.Contains(errorMsg, "Could not resolve host") {
