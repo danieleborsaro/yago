@@ -168,6 +168,103 @@ func TestSafeDirectory_OwnersDecideTrust_BehavioralBDD(t *testing.T) {
 	}
 }
 
+func TestSafeDirectory_LinkedWorktreeGitDir_BehavioralBDD(t *testing.T) {
+	contract := BehavioralContract{
+		Behavior:        "A linked worktree is only trusted when the gitdir its .git file names has the same owner too",
+		CurrentImpl:     "trustedRepository reads the gitdir from a .git file and checks its owner alongside the worktree and the file",
+		ExpectedOutcome: "One owner throughout is trusted, a gitdir with another owner gets git's refusal back",
+		Rationale:       "git reads config and hooks from that gitdir and checks its owner itself, trusting the worktree alone would run someone else's hooks",
+	}
+	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
+
+	tests := []struct {
+		name        string
+		gitDirOwner uint32
+		trusted     bool
+	}{
+		{name: "gitdir with the worktree's owner", gitDirOwner: 1, trusted: true},
+		{name: "gitdir with another owner", gitDirOwner: 2},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Given: a linked worktree of a repo git refuses for its owner, with the owner of the gitdir its .git file names faked
+			root, mainHash := newNamedRepo(t, "repo")
+			linked := filepath.Join(filepath.Dir(root), "linked")
+			gitCmd(t, root, "worktree", "add", "-q", linked, "feature")
+			globalConfig := assumeDifferentOwner(t, linked)
+			old := fileOwner
+			fileOwner = func(path string) (uint32, bool) {
+				if strings.Contains(filepath.ToSlash(path), "/.git/worktrees/") {
+					return tt.gitDirOwner, true
+				}
+				return 1, true
+			}
+			t.Cleanup(func() { fileOwner = old })
+
+			// When: the head is read from the linked worktree
+			head, err := WorktreeHead(linked)
+
+			// Then: it's read when the gitdir has the same owner, otherwise git's refusal comes back, and the global config is untouched
+			if tt.trusted {
+				if err != nil {
+					t.Fatalf("WorktreeHead: %v", err)
+				}
+				if head.Branch != "feature" || head.Commit != mainHash {
+					t.Errorf("head = %s, want feature at %s", head, mainHash)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), "dubious ownership") {
+				t.Fatalf("WorktreeHead error = %v, want git's ownership refusal", err)
+			}
+			assertEmptyFile(t, globalConfig)
+		})
+	}
+}
+
+func TestSafeDirectory_GitDirFromFile_BehavioralBDD(t *testing.T) {
+	contract := BehavioralContract{
+		Behavior:        "The gitdir a .git file names is read the way git reads it",
+		CurrentImpl:     "gitDirFromFile takes the path after gitdir: and resolves a relative one from the folder holding the file",
+		ExpectedOutcome: "Absolute and relative gitdirs resolve, anything else gives no gitdir so the repo isn't trusted",
+		Rationale:       "The owner check has to look at the same gitdir git will read config and hooks from",
+	}
+	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
+
+	base := t.TempDir()
+	tests := []struct {
+		name    string
+		content string
+		want    string
+		found   bool
+	}{
+		{name: "absolute", content: "gitdir: /work/repo/.git/worktrees/linked\n", want: "/work/repo/.git/worktrees/linked", found: true},
+		{name: "relative", content: "gitdir: ../repo/.git/worktrees/linked\n", want: filepath.Join(base, "repo", ".git", "worktrees", "linked"), found: true},
+		{name: "not a gitdir file", content: "ref: refs/heads/main\n"},
+		{name: "empty gitdir", content: "gitdir: \n"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Given: a .git file in a linked worktree
+			dotGit := filepath.Join(base, "linked", ".git")
+			if err := os.MkdirAll(filepath.Dir(dotGit), 0o750); err != nil {
+				t.Fatalf("mkdir: %v", err)
+			}
+			if err := os.WriteFile(dotGit, []byte(tt.content), 0o600); err != nil {
+				t.Fatalf("write .git: %v", err)
+			}
+
+			// When: the gitdir is read from it
+			got, found := gitDirFromFile(dotGit)
+
+			// Then: it's the gitdir git would use, or nothing
+			if got != tt.want || found != tt.found {
+				t.Errorf("gitDirFromFile = %q, %v, want %q, %v", got, found, tt.want, tt.found)
+			}
+		})
+	}
+}
+
 func TestSafeDirectory_OldGitIgnoresTheRetry_BehavioralBDD(t *testing.T) {
 	contract := BehavioralContract{
 		Behavior:        "When git still refuses a trusted repo after the one command retry, yago says which git it needs",

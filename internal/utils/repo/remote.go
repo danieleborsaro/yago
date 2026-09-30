@@ -56,6 +56,7 @@ func LsRemote(flags []string, url string, patterns ...string) ([]byte, error) {
 	if !interactive {
 		cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 		isolateProcessGroup(cmd)
+		defer cancelOnSignal(cancel)()
 	}
 	// where the whole group can't be killed, a helper like ssh can outlive git and keep the pipes open
 	cmd.WaitDelay = time.Second

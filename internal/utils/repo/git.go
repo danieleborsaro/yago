@@ -117,8 +117,17 @@ func trustedRepository(dir, top string) bool {
 		return false
 	}
 	entries := []string{top}
-	if gitDir := filepath.Join(top, ".git"); fileExists(gitDir) {
-		entries = append(entries, gitDir)
+	dotGit := filepath.Join(top, ".git")
+	if info, err := os.Lstat(dotGit); err == nil {
+		entries = append(entries, dotGit)
+		// a linked worktree's .git is a file naming the gitdir git reads config and hooks from, git checks its owner too
+		if info.Mode().IsRegular() {
+			gitDir, ok := gitDirFromFile(dotGit)
+			if !ok {
+				return false
+			}
+			entries = append(entries, gitDir)
+		}
 	}
 	for _, entry := range entries {
 		if entryOwner, ok := fileOwner(entry); !ok || entryOwner != owner {
@@ -128,9 +137,21 @@ func trustedRepository(dir, top string) bool {
 	return true
 }
 
-func fileExists(path string) bool {
-	_, err := os.Lstat(path)
-	return err == nil
+// reads "gitdir: <path>" the way git does, a relative path is taken from the folder holding the file
+func gitDirFromFile(dotGit string) (string, bool) {
+	data, err := os.ReadFile(filepath.Clean(dotGit))
+	if err != nil {
+		return "", false
+	}
+	gitDir, found := strings.CutPrefix(string(data), "gitdir: ")
+	gitDir = strings.TrimRight(gitDir, " \t\r\n")
+	if !found || gitDir == "" {
+		return "", false
+	}
+	if !filepath.IsAbs(gitDir) {
+		gitDir = filepath.Join(filepath.Dir(dotGit), gitDir)
+	}
+	return filepath.Clean(gitDir), true
 }
 
 // withSafeDirectoryRetry runs a git command, and if git refuses the repo for its ownership (common with Docker volumes)

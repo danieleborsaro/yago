@@ -5,6 +5,7 @@ package repo
 import (
 	"errors"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -137,6 +138,79 @@ func TestLsRemote_KillsLeftoverChildren_BehavioralBDD(t *testing.T) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+}
+
+func TestLsRemote_SignalStopsGitThenYago_BehavioralBDD(t *testing.T) {
+	contract := BehavioralContract{
+		Behavior:        "Without a terminal, a signal meant for yago takes git's whole group down first and is then handed on to yago",
+		CurrentImpl:     "cancelOnSignal cancels the command on SIGINT, SIGTERM or SIGHUP, which kills git's group, and release raises the signal again",
+		ExpectedOutcome: "ls-remote returns long before its deadline, the child holding git's output is gone, and yago gets the signal",
+		Rationale:       "git in a session of its own misses ctrl c or a kill meant for yago, and yago exiting took away the deadline that would have stopped it",
+	}
+	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
+
+	// Given: no terminal, a git that hangs with a child holding its output, the full deadline, and yago's own
+	// reaction to the signal caught so it doesn't end the test
+	setTerminal(t, false)
+	child := filepath.Join(t.TempDir(), "child")
+	fakeGit(t, "sleep 30 &\necho $! > '"+child+"'\nwait")
+	raised := make(chan syscall.Signal, 1)
+	oldRaise := raise
+	raise = func(sig syscall.Signal) { raised <- sig }
+	t.Cleanup(func() { raise = oldRaise })
+	backstop := make(chan os.Signal, 1)
+	signal.Notify(backstop, syscall.SIGINT)
+	t.Cleanup(func() { signal.Stop(backstop) })
+
+	start := time.Now()
+	result := make(chan error, 1)
+	go func() {
+		_, err := LsRemote(nil, "https://example.com/foo/bar.git")
+		result <- err
+	}()
+	for !fileExistsForTest(child) {
+		if time.Since(start) > 5*time.Second {
+			t.Fatalf("the fake git never started its child")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	pid := readInt(t, child)
+	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+
+	// When: yago gets ctrl c while git runs
+	if err := syscall.Kill(os.Getpid(), syscall.SIGINT); err != nil {
+		t.Fatalf("send SIGINT: %v", err)
+	}
+
+	// Then: ls-remote gave up well before its deadline, yago got the signal, and git's child is gone
+	select {
+	case err := <-result:
+		if err == nil {
+			t.Errorf("LsRemote succeeded, want it cut short")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("LsRemote still running after the signal")
+	}
+	select {
+	case sig := <-raised:
+		if sig != syscall.SIGINT {
+			t.Errorf("yago got %v, want SIGINT", sig)
+		}
+	default:
+		t.Errorf("the signal was never handed on to yago")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for !errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
+		if time.Now().After(deadline) {
+			t.Fatalf("child %d still running after the signal", pid)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func fileExistsForTest(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Size() > 0
 }
 
 func TestLookupOwner_RealUID_BehavioralBDD(t *testing.T) {
