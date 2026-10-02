@@ -66,26 +66,25 @@ type Repo struct {
 // Note: Caching is handled by internal/utils/repo package
 // We delegate to uRepo.IsCached(), uRepo.GetCachedRepo(), uRepo.CacheRepo()
 
-// NewRepo creates a new repository instance
-func NewRepo(url, ref, workDir string, config *uRepo.RepoConfig) *Repo {
+// a caller's config missing a progress handler gets one set on it, not on a copy
+func withDefaults(config *uRepo.RepoConfig) *uRepo.RepoConfig {
 	if config == nil {
 		logger := logging.NewLogger(logging.INFO)
-		config = &uRepo.RepoConfig{
-			Logger:          logger,
-			ProgressHandler: uRepo.NewLogProgressHandler(logger),
-		}
+		return &uRepo.RepoConfig{Logger: logger, ProgressHandler: uRepo.NewLogProgressHandler(logger)}
 	}
-
-	// Ensure progress handler is set if not provided
 	if config.ProgressHandler == nil && config.Logger != nil {
 		config.ProgressHandler = uRepo.NewLogProgressHandler(config.Logger)
 	}
+	return config
+}
 
+// NewRepo creates a new repository instance
+func NewRepo(url, ref, workDir string, config *uRepo.RepoConfig) *Repo {
 	repo := &Repo{
 		URL:     url,
 		Ref:     ref,
 		WorkDir: workDir,
-		config:  config,
+		config:  withDefaults(config),
 	}
 
 	repo.parseURL()
@@ -94,22 +93,9 @@ func NewRepo(url, ref, workDir string, config *uRepo.RepoConfig) *Repo {
 
 // NewRepoFromDesiredState creates a repository from desired state content
 func NewRepoFromDesiredState(content map[string]interface{}, item, workDir, refOverride string, config *uRepo.RepoConfig) (*Repo, error) {
-	if config == nil {
-		logger := logging.NewLogger(logging.INFO)
-		config = &uRepo.RepoConfig{
-			Logger:          logger,
-			ProgressHandler: uRepo.NewLogProgressHandler(logger),
-		}
-	}
-
-	// Ensure progress handler is set if not provided
-	if config.ProgressHandler == nil && config.Logger != nil {
-		config.ProgressHandler = uRepo.NewLogProgressHandler(config.Logger)
-	}
-
 	repo := &Repo{
 		WorkDir: workDir,
-		config:  config,
+		config:  withDefaults(config),
 	}
 
 	// Parse repo info from desired state
@@ -157,23 +143,10 @@ func NewRepoFromWorkDir(workDir string, refOverride string, config *uRepo.RepoCo
 		return nil, errors.NewParamError("workDir cannot be empty")
 	}
 
-	if config == nil {
-		logger := logging.NewLogger(logging.INFO)
-		config = &uRepo.RepoConfig{
-			Logger:          logger,
-			ProgressHandler: uRepo.NewLogProgressHandler(logger),
-		}
-	}
-
-	// Ensure progress handler is set if not provided
-	if config.ProgressHandler == nil && config.Logger != nil {
-		config.ProgressHandler = uRepo.NewLogProgressHandler(config.Logger)
-	}
-
 	repo := &Repo{
 		WorkDir: workDir,
 		Ref:     refOverride,
-		config:  config,
+		config:  withDefaults(config),
 	}
 
 	// Try to load as git repo (transparently handles non-git directories)
@@ -393,19 +366,19 @@ func (r *Repo) ValidateRemote() error {
 
 	// Use git ls-remote to check if remote is reachable
 	// This is lightweight and doesn't clone the repository
-	cmd := exec.Command("git", "ls-remote", "--heads", r.URL)
-	output, err := cmd.CombinedOutput()
+	_, err := uRepo.LsRemote([]string{"--heads"}, r.URL)
 
 	if err != nil {
 		// Parse the error to provide more helpful messages
-		errorMsg := string(output)
+		errorMsg := err.Error()
 
 		if strings.Contains(errorMsg, "not found") || strings.Contains(errorMsg, "does not exist") ||
 			strings.Contains(errorMsg, "could not read Username") {
 			// GitHub returns an ambiguous credential prompt over HTTPS for both private and non-existent repos.
 			return errors.Newf(errors.ErrFail, "VALIDATION ERROR: repository not found: %s\nPlease verify the URL is correct and you have access", r.URL)
 		}
-		if strings.Contains(errorMsg, "Permission denied") || strings.Contains(errorMsg, "Authentication failed") {
+		if strings.Contains(errorMsg, "Permission denied") || strings.Contains(errorMsg, "Authentication failed") ||
+			strings.Contains(errorMsg, "could not read Password") {
 			return errors.Newf(errors.ErrFail, "VALIDATION ERROR: authentication failed for: %s\nPlease check your SSH keys or credentials", r.URL)
 		}
 		if strings.Contains(errorMsg, "Could not resolve host") {
@@ -413,7 +386,7 @@ func (r *Repo) ValidateRemote() error {
 		}
 
 		// Generic error
-		return errors.Newf(errors.ErrFail, "VALIDATION ERROR: remote repository not accessible: %s\nError: %v\nOutput: %s", r.URL, err, errorMsg)
+		return errors.Newf(errors.ErrFail, "VALIDATION ERROR: remote repository not accessible: %s\nError: %v", r.URL, err)
 	}
 
 	r.config.Logger.Debug("Remote repository validated successfully: %s", r.URL)
@@ -437,20 +410,17 @@ func (r *Repo) ValidateRef() error {
 
 	// Use git ls-remote to check if ref exists
 	// Try multiple formats: refs/heads/{ref}, refs/tags/{ref}, and direct ref
-	cmd := exec.Command("git", "ls-remote", r.URL, r.Ref)
-	output, err := cmd.CombinedOutput()
+	output, err := uRepo.LsRemote(nil, r.URL, r.Ref)
 
 	if err != nil {
-		errorMsg := string(output)
-		return errors.Newf(errors.ErrFail, "VALIDATION ERROR: failed to validate ref '%s' on %s\nError: %v\nOutput: %s", r.Ref, r.URL, err, errorMsg)
+		return errors.Newf(errors.ErrFail, "VALIDATION ERROR: failed to validate ref '%s' on %s\nError: %v", r.Ref, r.URL, err)
 	}
 
 	// Check if we got any output - empty output means ref doesn't exist
 	outputStr := strings.TrimSpace(string(output))
 	if outputStr == "" {
 		// Try checking as a branch
-		cmdBranch := exec.Command("git", "ls-remote", "--heads", r.URL, fmt.Sprintf("refs/heads/%s", r.Ref))
-		outputBranch, errBranch := cmdBranch.CombinedOutput()
+		outputBranch, errBranch := uRepo.LsRemote([]string{"--heads"}, r.URL, fmt.Sprintf("refs/heads/%s", r.Ref))
 
 		if errBranch == nil && strings.TrimSpace(string(outputBranch)) != "" {
 			r.config.Logger.Debug("Ref '%s' validated as branch on remote", r.Ref)
@@ -458,8 +428,7 @@ func (r *Repo) ValidateRef() error {
 		}
 
 		// Try checking as a tag
-		cmdTag := exec.Command("git", "ls-remote", "--tags", r.URL, fmt.Sprintf("refs/tags/%s", r.Ref))
-		outputTag, errTag := cmdTag.CombinedOutput()
+		outputTag, errTag := uRepo.LsRemote([]string{"--tags"}, r.URL, fmt.Sprintf("refs/tags/%s", r.Ref))
 
 		if errTag == nil && strings.TrimSpace(string(outputTag)) != "" {
 			r.config.Logger.Debug("Ref '%s' validated as tag on remote", r.Ref)
@@ -501,76 +470,40 @@ func (r *Repo) IsGitRepo() bool {
 // CloneBare clones the repository as a bare repository
 // Bare repositories don't have a working directory, only .git content
 func (r *Repo) CloneBare() error {
+	return r.cloneBare("bare", uRepo.CloneBare)
+}
+
+func (r *Repo) cloneBare(kind string, clone func(url, path string, force bool, config *uRepo.RepoConfig) (*uRepo.Repository, error)) error {
 	if r.URL == "" {
 		return errors.NewParamError("repository URL not set")
 	}
 
-	r.config.Logger.Info("Cloning bare repository: %s", r.URL)
+	r.config.Logger.Info("Cloning %s repository: %s", kind, r.URL)
 
-	// Determine work directory for clone
 	workDir := r.WorkDir
 	if workDir == "" {
-		// Use temp directory with .bare suffix
-		workDir = filepath.Join("/tmp", "gitops-repo", r.Name+".bare")
+		workDir = filepath.Join(defaultFixedCloneBaseDir, r.Name+".bare")
 	}
 
-	// Clone as bare
-	repository, err := uRepo.CloneBare(r.URL, workDir, false, r.config)
+	repository, err := clone(r.URL, workDir, false, r.config)
 	if err != nil {
-		return errors.Wrapf(errors.ErrFail, err, "failed to clone bare repository")
+		return errors.Wrapf(errors.ErrFail, err, "failed to clone %s repository", kind)
 	}
 
 	r.repository = repository
 	r.isGitRepo = true
-	r.IsBare = true
 	r.WorkDir = repository.GetPath()
-
-	// Update properties from git
 	r.updateProperties()
-
-	// Cache this repo
 	r.setCache()
 
-	r.config.Logger.Info("Successfully cloned bare repository: %s -> %s", r.URL, r.WorkDir)
+	r.config.Logger.Info("Successfully cloned %s repository: %s -> %s", kind, r.URL, r.WorkDir)
 	return nil
 }
 
 // CloneMirror clones the repository as a mirror
 // Mirror repositories include all refs and are suitable for backup/mirroring
 func (r *Repo) CloneMirror() error {
-	if r.URL == "" {
-		return errors.NewParamError("repository URL not set")
-	}
-
-	r.config.Logger.Info("Cloning mirror repository: %s", r.URL)
-
-	// Determine work directory for clone
-	workDir := r.WorkDir
-	if workDir == "" {
-		// Use temp directory with .bare suffix (mirrors are also bare)
-		workDir = filepath.Join("/tmp", "gitops-repo", r.Name+".bare")
-	}
-
-	// Clone as mirror
-	repository, err := uRepo.CloneMirror(r.URL, workDir, false, r.config)
-	if err != nil {
-		return errors.Wrapf(errors.ErrFail, err, "failed to clone mirror repository")
-	}
-
-	r.repository = repository
-	r.isGitRepo = true
-	r.IsBare = true
-	r.IsMirror = true
-	r.WorkDir = repository.GetPath()
-
-	// Update properties from git
-	r.updateProperties()
-
-	// Cache this repo
-	r.setCache()
-
-	r.config.Logger.Info("Successfully cloned mirror repository: %s -> %s", r.URL, r.WorkDir)
-	return nil
+	return r.cloneBare("mirror", uRepo.CloneMirror)
 }
 
 // Bundle creates a git bundle from a bare repository
@@ -590,24 +523,28 @@ func (r *Repo) Bundle(destDir string) (string, error) {
 // isCached checks whether this repo URL was already cloned
 // Delegates to low-level uRepo.IsCached()
 func (r *Repo) isCached() bool {
-	exists := uRepo.IsCached(r.URL)
-	r.config.Logger.Debug("Repo is %scached: %s", map[bool]string{true: "", false: "not "}[exists], r.URL)
+	exists := uRepo.IsCached(r.cacheKey())
+	r.config.Logger.Debug("Repo is %scached: %s", map[bool]string{true: "", false: "not "}[exists], r.cacheKey())
 	return exists
 }
 
 // getCache retrieves the cached workdir for this repo URL
 // Delegates to low-level uRepo.GetCachedRepo()
 func (r *Repo) getCache() string {
-	workdir, _ := uRepo.GetCachedRepo(r.URL)
-	r.config.Logger.Debug("Repo retrieved from cache: %s --> %s", r.URL, workdir)
+	workdir, _ := uRepo.GetCachedRepo(r.cacheKey())
+	r.config.Logger.Debug("Repo retrieved from cache: %s --> %s", r.cacheKey(), workdir)
 	return workdir
 }
 
 // setCache stores the workdir for this repo URL in the cache
 // Delegates to low-level uRepo.CacheRepo()
 func (r *Repo) setCache() {
-	uRepo.CacheRepo(r.URL, r.WorkDir)
-	r.config.Logger.Debug("Repo added to cache: %s --> %s", r.URL, r.WorkDir)
+	uRepo.CacheRepo(r.cacheKey(), r.WorkDir)
+	r.config.Logger.Debug("Repo added to cache: %s --> %s", r.cacheKey(), r.WorkDir)
+}
+
+func (r *Repo) cacheKey() string {
+	return uRepo.CacheKey(r.URL, r.IsBare, r.IsMirror)
 }
 
 // updateProperties updates git properties for current checked out workdir
@@ -805,20 +742,9 @@ func parseRepoURL(content map[string]interface{}, item string, propertyPaths *sc
 
 	config.Logger.Debug("Using schema-based URL field: '%s' for item '%s'", urlPath, item)
 
-	// Navigate to repo config using item path if provided
-	repoConfig := content
-	if item != "" {
-		yamlHandler := parser.NewYAMLHandler("")
-		value, err := yamlHandler.GetValue(content, item)
-		if err != nil {
-			return "", errors.Wrapf(errors.ErrParse, err, "failed to navigate to repo config at path '%s'", item)
-		}
-
-		var ok bool
-		repoConfig, ok = value.(map[string]interface{})
-		if !ok {
-			return "", errors.Newf(errors.ErrParse, "repo config at path '%s' is not a valid object", item)
-		}
+	repoConfig, err := repoSection(content, item)
+	if err != nil {
+		return "", err
 	}
 
 	// Extract the URL field name from the schema path (it's just the field name)
@@ -840,20 +766,9 @@ func parseRepoURL(content map[string]interface{}, item string, propertyPaths *sc
 // Precedence: ref → tag → branch
 // Returns error if NONE found - NO DEFAULTS (fail-fast)
 func parseRepoRef(content map[string]interface{}, item string, propertyPaths *schema.PropertyPaths, config *uRepo.RepoConfig) (string, error) {
-	// Navigate to repo config using item path if provided
-	repoConfig := content
-	if item != "" {
-		yamlHandler := parser.NewYAMLHandler("")
-		value, err := yamlHandler.GetValue(content, item)
-		if err != nil {
-			return "", errors.Wrapf(errors.ErrParse, err, "failed to navigate to repo config at path '%s'", item)
-		}
-
-		var ok bool
-		repoConfig, ok = value.(map[string]interface{})
-		if !ok {
-			return "", errors.Newf(errors.ErrParse, "repo config at path '%s' is not a valid object", item)
-		}
+	repoConfig, err := repoSection(content, item)
+	if err != nil {
+		return "", err
 	}
 
 	// Try ref field first (highest precedence)
@@ -897,20 +812,9 @@ func parseRepoPath(content map[string]interface{}, item string, propertyPaths *s
 	// Get the schema-based path to the path field
 	pathField := propertyPaths.GetRepoPathPath("")
 
-	// Navigate to repo config using item path if provided
-	repoConfig := content
-	if item != "" {
-		yamlHandler := parser.NewYAMLHandler("")
-		value, err := yamlHandler.GetValue(content, item)
-		if err != nil {
-			return "", errors.Wrapf(errors.ErrParse, err, "failed to navigate to repo config at path '%s'", item)
-		}
-
-		var ok bool
-		repoConfig, ok = value.(map[string]interface{})
-		if !ok {
-			return "", errors.Newf(errors.ErrParse, "repo config at path '%s' is not a valid object", item)
-		}
+	repoConfig, err := repoSection(content, item)
+	if err != nil {
+		return "", err
 	}
 
 	if path, exists := repoConfig[pathField]; exists {
@@ -931,20 +835,9 @@ func parseRepoWatch(content map[string]interface{}, item string, propertyPaths *
 	// Get the schema-based path to the watch field
 	watchField := propertyPaths.GetRepoWatchPath("")
 
-	// Navigate to repo config using item path if provided
-	repoConfig := content
-	if item != "" {
-		yamlHandler := parser.NewYAMLHandler("")
-		value, err := yamlHandler.GetValue(content, item)
-		if err != nil {
-			return []string{}, errors.Wrapf(errors.ErrParse, err, "failed to navigate to repo config at path '%s'", item)
-		}
-
-		var ok bool
-		repoConfig, ok = value.(map[string]interface{})
-		if !ok {
-			return []string{}, errors.Newf(errors.ErrParse, "repo config at path '%s' is not a valid object", item)
-		}
+	repoConfig, err := repoSection(content, item)
+	if err != nil {
+		return []string{}, err
 	}
 
 	if watchVal, exists := repoConfig[watchField]; exists {
@@ -967,6 +860,21 @@ func parseRepoWatch(content map[string]interface{}, item string, propertyPaths *
 	// Watch list not found or invalid - this is OK, it's optional
 	config.Logger.Debug("Watch field '%s' not found, treating as empty list", watchField)
 	return []string{}, nil
+}
+
+func repoSection(content map[string]interface{}, item string) (map[string]interface{}, error) {
+	if item == "" {
+		return content, nil
+	}
+	value, err := parser.NewYAMLHandler("").GetValue(content, item)
+	if err != nil {
+		return nil, errors.Wrapf(errors.ErrParse, err, "failed to navigate to repo config at path '%s'", item)
+	}
+	section, ok := value.(map[string]interface{})
+	if !ok {
+		return nil, errors.Newf(errors.ErrParse, "repo config at path '%s' is not a valid object", item)
+	}
+	return section, nil
 }
 
 // extractSchemaVersion extracts the schema version from content
