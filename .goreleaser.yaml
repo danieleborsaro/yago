@@ -63,7 +63,7 @@ brews:
   - name: yago
     repository:
       owner: danieleborsaro
-      name: homebrew-gitops
+      name: homebrew-devops
       token: "{{ .Env.TAP_GITHUB_TOKEN }}"
       # Define a unique branch name for each release tag
       branch: "release-{{ .Tag }}"
@@ -72,6 +72,6 @@ brews:
       pull_request:
         enabled: true
 
-    homepage: "https://github.com/danieleborsaro/homebrew-gitops"
+    homepage: "https://github.com/danieleborsaro/homebrew-devops"
     description: "Yago is a GitOps tool for non-kubernetes platforms"
     license: "Apache-2.0"
