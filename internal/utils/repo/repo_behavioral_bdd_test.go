@@ -728,9 +728,7 @@ func TestProgressHandler_BehavioralBDD(t *testing.T) {
 //
 // Go Implementation (internal/utils/repo):
 //   - isUnsafeRepositoryError(): Detects unsafe repository error
-//   - markDirectoryAsSafe(): Marks directory as safe via git config
 //   - withSafeDirectoryRetry(): Wrapper function that retries operations
-//   - Used when loading/operating on Docker volume-mounted repositories
 //
 // Behavioral Contract:
 // Both detect and handle Git's "unsafe repository" error (typically when
@@ -779,7 +777,7 @@ func TestSafeDirectoryHandling_BehavioralBDD(t *testing.T) {
 		logger := logging.NewLogger(logging.DEBUG)
 		callCount := 0
 
-		err := withSafeDirectoryRetry("/tmp/test-repo", logger, func() error {
+		err := withSafeDirectoryRetry("/tmp/test-repo", logger, func([]string) error {
 			callCount++
 			return fmt.Errorf("some other error")
 		})
@@ -800,7 +798,7 @@ func TestSafeDirectoryHandling_BehavioralBDD(t *testing.T) {
 		logger := logging.NewLogger(logging.DEBUG)
 		callCount := 0
 
-		err := withSafeDirectoryRetry("/tmp/test-repo", logger, func() error {
+		err := withSafeDirectoryRetry("/tmp/test-repo", logger, func([]string) error {
 			callCount++
 			return nil
 		})
@@ -830,8 +828,9 @@ Git 2.35+ security feature blocks operations on such repositories:
 
 Solution flow:
   1. Detect the error
-  2. Mark directory as safe: git config --global --add safe.directory /repo
-  3. Retry the operation
+  2. If /repo and its .git have the owner of what yago was pointed at, retry once with:
+     git -c safe.directory=/repo ... (git 2.38 and later honour it)
+  3. The user's global git config is never written
 
 This is CRITICAL for CI/CD pipelines using Docker containers.
 

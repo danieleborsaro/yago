@@ -1,0 +1,255 @@
+package repo
+
+import (
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/danieleborsaro/yago/internal/utils/logging"
+)
+
+// puts a fake git first on PATH that writes its args one per line to the returned file, then runs body
+func fakeGit(t *testing.T, body string) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the fake git is a shell script")
+	}
+	dir := t.TempDir()
+	argsFile := filepath.Join(dir, "args")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > '" + argsFile + "'\n" + body + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0o700); err != nil { //nolint:gosec // test script has to be executable
+		t.Fatalf("write fake git: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return argsFile
+}
+
+func setTerminal(t *testing.T, attached bool) {
+	t.Helper()
+	old := hasTerminal
+	hasTerminal = func() bool { return attached }
+	t.Cleanup(func() { hasTerminal = old })
+}
+
+func readArgs(t *testing.T, argsFile string) []string {
+	t.Helper()
+	data, err := os.ReadFile(argsFile) //nolint:gosec // path comes from t.TempDir
+	if err != nil {
+		t.Fatalf("read fake git args: %v", err)
+	}
+	return strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+}
+
+func TestLsRemote_OptionLikeValues_BehavioralBDD(t *testing.T) {
+	contract := BehavioralContract{
+		Behavior:        "ls-remote refuses a URL or ref from yaml that starts with a dash",
+		CurrentImpl:     "LsRemote checks every value with RejectOptionLike before git runs",
+		ExpectedOutcome: "An ErrParam error comes back and git is never started",
+		Rationale:       "git ls-remote --upload-pack=<cmd> runs <cmd>, so a crafted desired state could run anything",
+	}
+	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
+
+	tests := []struct {
+		name     string
+		url      string
+		patterns []string
+	}{
+		{name: "upload pack url", url: "--upload-pack=touch pwned"},
+		{name: "short option url", url: "-u"},
+		{name: "option ref", url: "https://example.com/foo/bar.git", patterns: []string{"--exec=touch pwned"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Given: a git on PATH that records whether it ran
+			argsFile := fakeGit(t, "exit 0")
+
+			// When: ls-remote is asked for the dash led value
+			_, err := LsRemote(nil, tt.url, tt.patterns...)
+
+			// Then: it's refused and git never ran
+			if err == nil || !strings.Contains(err.Error(), "can't start with a dash") {
+				t.Fatalf("LsRemote error = %v, want a dash refusal", err)
+			}
+			if _, statErr := os.Stat(argsFile); !os.IsNotExist(statErr) {
+				t.Errorf("git ran with %v, it should never have started", readArgs(t, argsFile))
+			}
+		})
+	}
+}
+
+func TestLsRemote_EndsOptionsBeforeURL_BehavioralBDD(t *testing.T) {
+	contract := BehavioralContract{
+		Behavior:        "ls-remote puts the URL and patterns after --",
+		CurrentImpl:     "LsRemote builds ls-remote <flags> -- <url> <patterns>",
+		ExpectedOutcome: "git sees the flags yago chose, then --, then the values from yaml",
+		Rationale:       "Ending the options means git can never read a yaml value as a flag",
+	}
+	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
+
+	// Given: a git on PATH that records its args
+	argsFile := fakeGit(t, "exit 0")
+
+	// When: ls-remote runs with a flag, a url and a pattern
+	if _, err := LsRemote([]string{"--heads"}, "https://example.com/foo/bar.git", "refs/heads/main"); err != nil {
+		t.Fatalf("LsRemote: %v", err)
+	}
+
+	// Then: the url and pattern come after the end of options
+	got := strings.Join(readArgs(t, argsFile), " ")
+	want := "ls-remote --heads -- https://example.com/foo/bar.git refs/heads/main"
+	if got != want {
+		t.Errorf("git args = %q, want %q", got, want)
+	}
+}
+
+func TestLsRemote_HungRemote_BehavioralBDD(t *testing.T) {
+	contract := BehavioralContract{
+		Behavior:        "Without a terminal, ls-remote gives up on a remote that never answers",
+		CurrentImpl:     "LsRemote runs git under a context deadline when hasTerminal is false",
+		ExpectedOutcome: "A timed out error comes back soon after the deadline instead of hanging",
+		Rationale:       "In CI or a pipe an unreachable host used to hang yago with nobody there to press ctrl c",
+	}
+	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
+
+	// Given: no terminal, a git that hangs, and a short deadline
+	setTerminal(t, false)
+	fakeGit(t, "exec sleep 30")
+	old := lsRemoteTimeout
+	lsRemoteTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { lsRemoteTimeout = old })
+
+	// When: ls-remote runs
+	start := time.Now()
+	_, err := LsRemote(nil, "https://example.com/foo/bar.git")
+	elapsed := time.Since(start)
+
+	// Then: it times out well before the fake git would have finished
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("LsRemote error = %v, want a timeout", err)
+	}
+	if elapsed > 10*time.Second {
+		t.Errorf("LsRemote took %s, the deadline was %s", elapsed, lsRemoteTimeout)
+	}
+}
+
+func TestLsRemote_LocalRemote_BehavioralBDD(t *testing.T) {
+	contract := BehavioralContract{
+		Behavior:        "ls-remote still lists refs from a real remote",
+		CurrentImpl:     "LsRemote returns stdout of git ls-remote",
+		ExpectedOutcome: "The branch and its commit come back, and a missing ref gives empty output",
+		Rationale:       "The -- and the timeout must not change what callers parse",
+	}
+	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
+
+	// Given: a remote with one commit on main
+	fx := newCheckoutFixture(t)
+
+	// When: its heads are listed, and a ref it doesn't have
+	out, err := LsRemote([]string{"--heads"}, fx.clone, "refs/heads/main")
+	if err != nil {
+		t.Fatalf("LsRemote: %v", err)
+	}
+	missing, err := LsRemote(nil, fx.clone, "refs/heads/nope")
+	if err != nil {
+		t.Fatalf("LsRemote missing ref: %v", err)
+	}
+
+	// Then: main points at its commit and the missing ref lists nothing
+	if !strings.HasPrefix(string(out), fx.mainHash+"\trefs/heads/main") {
+		t.Errorf("ls-remote output = %q, want main at %s", out, fx.mainHash)
+	}
+	if strings.TrimSpace(string(missing)) != "" {
+		t.Errorf("ls-remote for a missing ref = %q, want nothing", missing)
+	}
+}
+
+func TestLsRemote_KeepsStderrOutOfOutput_BehavioralBDD(t *testing.T) {
+	contract := BehavioralContract{
+		Behavior:        "ls-remote returns only what git lists on stdout, and git's stderr only in the error",
+		CurrentImpl:     "LsRemote gives git separate stdout and stderr buffers",
+		ExpectedOutcome: "A warning on a successful run stays out of the output, and a failure's message is in the error",
+		Rationale:       "ValidateRef reads any output as a found ref, and git warns on stderr when a remote redirects even when the ref is missing, ValidateRemote matches on the failure's message",
+	}
+	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
+
+	t.Run("warning on success", func(t *testing.T) {
+		// Given: a git that lists a ref and warns about a redirect
+		fakeGit(t, "printf '123456789012\\trefs/heads/main\\n'\necho 'warning: redirecting to https://example.com/foo/baz.git/' >&2")
+
+		// When: ls-remote runs
+		out, err := LsRemote(nil, "https://example.com/foo/bar.git", "refs/heads/main")
+
+		// Then: the output is only the listed ref
+		if err != nil {
+			t.Fatalf("LsRemote: %v", err)
+		}
+		if string(out) != "123456789012\trefs/heads/main\n" {
+			t.Errorf("output = %q, want only the listed ref", out)
+		}
+	})
+
+	t.Run("failure", func(t *testing.T) {
+		// Given: a git that can't find the repository
+		fakeGit(t, "echo 'fatal: repository not found' >&2\nexit 128")
+
+		// When: ls-remote runs
+		out, err := LsRemote(nil, "https://example.com/foo/bar.git")
+
+		// Then: there's no output and git's message is in the error
+		if err == nil || !strings.Contains(err.Error(), "repository not found") {
+			t.Fatalf("LsRemote error = %v, want git's message in it", err)
+		}
+		if len(out) != 0 {
+			t.Errorf("output = %q, want none", out)
+		}
+	})
+}
+
+func TestCloneWithGitCLI_OptionLikeURL_BehavioralBDD(t *testing.T) {
+	contract := BehavioralContract{
+		Behavior:        "The native git clone ends options before the URL and path",
+		CurrentImpl:     "cloneWithGitCLI refuses a dash led URL and passes -- <url> <path>",
+		ExpectedOutcome: "A dash led URL never reaches git, and a normal clone gets -- before the URL",
+		Rationale:       "git clone --upload-pack=<cmd> runs <cmd>, and the URL comes from yaml",
+	}
+	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
+	logger := logging.NewLogger(logging.ERROR)
+
+	t.Run("dash led url", func(t *testing.T) {
+		// Given: a git on PATH that records whether it ran
+		argsFile := fakeGit(t, "exit 0")
+
+		// When: the url is an option
+		err := cloneWithGitCLI("--upload-pack=touch pwned", t.TempDir(), "", false, false, logger)
+
+		// Then: it's refused before git starts
+		if err == nil || !strings.Contains(err.Error(), "can't start with a dash") {
+			t.Fatalf("cloneWithGitCLI error = %v, want a dash refusal", err)
+		}
+		if _, statErr := os.Stat(argsFile); !os.IsNotExist(statErr) {
+			t.Errorf("git ran with %v, it should never have started", readArgs(t, argsFile))
+		}
+	})
+
+	t.Run("normal url", func(t *testing.T) {
+		// Given: a git on PATH that records its args
+		argsFile := fakeGit(t, "exit 0")
+		dest := filepath.Join(t.TempDir(), "bar")
+
+		// When: a branch is cloned
+		if err := cloneWithGitCLI("https://example.com/foo/bar.git", dest, "main", false, false, logger); err != nil {
+			t.Fatalf("cloneWithGitCLI: %v", err)
+		}
+
+		// Then: the url and path come after the end of options
+		args := readArgs(t, argsFile)
+		tail := strings.Join(args[len(args)-3:], " ")
+		if want := "-- https://example.com/foo/bar.git " + dest; tail != want {
+			t.Errorf("git args end with %q, want %q", tail, want)
+		}
+	})
+}
