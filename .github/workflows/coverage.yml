@@ -304,8 +304,8 @@ jobs:
           git config --local commit.gpgsign true
 
           # Fetch remote branches and switch to the target branch (create it if missing)
-          git fetch origin "$COVERAGE_BRANCH" || true
-          git checkout -B "$COVERAGE_BRANCH" origin/"$COVERAGE_BRANCH" 2>/dev/null || git checkout "$COVERAGE_BRANCH"
+          git fetch origin "$COVERAGE_BRANCH" 2>/dev/null || true
+          git checkout -B "$COVERAGE_BRANCH" origin/"$COVERAGE_BRANCH"
 
           # Stage the coverage file (it carries over when you switch branches)
           git add .coverage-history/coverage.csv
