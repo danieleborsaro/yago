@@ -2,7 +2,6 @@ package repo
 
 import (
 	"bytes"
-	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -15,6 +14,7 @@ import (
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v5/plumbing/transport"
 	"github.com/go-git/go-git/v5/plumbing/transport/http"
 )
 
@@ -243,30 +243,39 @@ type Repository struct {
 
 // NewRepository creates a new repository instance from an existing repo
 func NewRepository(path string, config *RepoConfig) (*Repository, error) {
-	if config == nil {
-		config = &RepoConfig{
-			Logger: logging.NewLogger(logging.INFO),
-		}
-	}
-
-	repo, err := git.PlainOpen(path)
+	repository, err := openRepository(path, withDefaults(config))
 	if err != nil {
 		return nil, errors.Wrapf(errors.ErrParse, err, "failed to open repository at %s", path)
 	}
+	return repository, nil
+}
 
-	// Detect if this is a bare repository
-	isBare := false
-	if cfg, err := repo.Config(); err == nil {
-		isBare = cfg.Core.IsBare
+func withDefaults(config *RepoConfig) *RepoConfig {
+	if config == nil {
+		return &RepoConfig{Logger: logging.NewLogger(logging.INFO)}
+	}
+	return config
+}
+
+// a linked worktree has a .git file and keeps its remotes in the main repo's config, go-git only reads that with
+// EnableDotGitCommonDir, which is left off for everything else so normal repos open exactly as before
+func openRepository(path string, config *RepoConfig) (*Repository, error) {
+	info, err := os.Stat(filepath.Join(path, ".git"))
+	linked := err == nil && !info.IsDir()
+	repo, err := git.PlainOpenWithOptions(path, &git.PlainOpenOptions{EnableDotGitCommonDir: linked})
+	if err != nil {
+		return nil, err
 	}
 
-	return &Repository{
-		repo:     repo,
-		config:   config,
-		path:     path,
-		isBare:   isBare,
-		isMirror: false, // Mirror detection requires checking remote config
-	}, nil
+	// core.bare comes from the shared config, so a worktree of a bare repo reads true, having no worktree is what makes it bare
+	_, wtErr := repo.Worktree()
+	repository := &Repository{repo: repo, config: config, path: path, isBare: wtErr == git.ErrIsBareRepository}
+	if cfg, err := repo.Config(); err == nil && repository.isBare {
+		if origin, ok := cfg.Remotes["origin"]; ok {
+			repository.isMirror = origin.Mirror
+		}
+	}
+	return repository, nil
 }
 
 // Load tries to load a directory as a Git repository
@@ -274,11 +283,7 @@ func NewRepository(path string, config *RepoConfig) (*Repository, error) {
 // Returns (nil, false, nil) if not a git repo (logs warning)
 // Returns (nil, false, err) for actual errors
 func Load(workDir string, config *RepoConfig) (*Repository, bool, error) {
-	if config == nil {
-		config = &RepoConfig{
-			Logger: logging.NewLogger(logging.INFO),
-		}
-	}
+	config = withDefaults(config)
 
 	if workDir == "" {
 		return nil, false, errors.NewParamError("workdir not specified")
@@ -292,31 +297,16 @@ func Load(workDir string, config *RepoConfig) (*Repository, bool, error) {
 
 	config.Logger.Info("Loading repo: '%s'", absPath)
 
-	repo, err := git.PlainOpen(absPath)
+	repository, err := openRepository(absPath, config)
 	if err != nil {
 		// Not a git repo - this is expected behavior, just warn
 		config.Logger.Warn("Not a Git repo, skipping: %s", absPath)
 		return nil, false, nil
 	}
 
-	// Successfully loaded as git repo
-	// Detect if this is a bare repository
-	isBare := false
-	if cfg, err := repo.Config(); err == nil {
-		isBare = cfg.Core.IsBare
-	}
-
-	repository := &Repository{
-		repo:     repo,
-		config:   config,
-		path:     absPath,
-		isBare:   isBare,
-		isMirror: false,
-	}
-
 	// Add to cache if we loaded successfully
 	if url, err := repository.GetRemoteURL(); err == nil && url != "" {
-		CacheRepo(url, absPath)
+		CacheRepo(CacheKey(url, repository.isBare, repository.isMirror), absPath)
 	}
 
 	return repository, true, nil
@@ -326,107 +316,93 @@ func Load(workDir string, config *RepoConfig) (*Repository, bool, error) {
 // Checks cache first to avoid duplicate clones unless force is true
 // If force is true, bypasses cache and clones even if already cached
 func Clone(url, path string, force bool, config *RepoConfig) (*Repository, error) {
-	if config == nil {
-		config = &RepoConfig{
-			Logger: logging.NewLogger(logging.INFO),
-		}
-	}
+	return cloneRepo(cloneSpec{url: url, path: path, cacheKey: CacheKey(url, false, false), force: force}, config)
+}
 
-	// Check cache first (unless force is specified)
-	if !force {
-		if cachedPath, found := GetCachedRepo(url); found {
-			config.Logger.Info("Repository already cached: %s -> %s", url, cachedPath)
-			return NewRepository(cachedPath, config)
+// CacheKey keeps bare and mirror clones apart from working clones of the same url, handing a bare dir to
+// someone who wants files breaks them
+func CacheKey(url string, bare, mirror bool) string {
+	switch {
+	case mirror:
+		return url + "#mirror"
+	case bare:
+		return url + "#bare"
+	}
+	return url
+}
+
+type cloneSpec struct {
+	url, path, branch, cacheKey string
+	bare, mirror, force         bool
+}
+
+func (s cloneSpec) kind() string {
+	switch {
+	case s.mirror:
+		return "mirror repository"
+	case s.bare:
+		return "bare repository"
+	case s.branch != "":
+		return "branch " + s.branch
+	}
+	return "repository"
+}
+
+// every clone flavour is cached under its own key, so a bare and a working clone of one url never share a dir
+func cloneRepo(s cloneSpec, config *RepoConfig) (*Repository, error) {
+	config = withDefaults(config)
+
+	if !s.force {
+		if cachedPath, found := GetCachedRepo(s.cacheKey); found {
+			config.Logger.Info("Using cached %s: %s -> %s", s.kind(), s.cacheKey, cachedPath)
+			return reuseCached(cachedPath, s.branch, config)
 		}
 	} else {
 		config.Logger.Info("Force clone enabled, bypassing cache")
 	}
 
-	config.Logger.Info("Cloning repository from %s to %s", url, path)
+	config.Logger.Info("Cloning %s from %s to %s", s.kind(), s.url, s.path)
 
-	// Apply namedWorkDir logic - append repo name to path if needed
-	path = NamedWorkDir(path, url, false, false, true)
+	path := NamedWorkDir(s.path, s.url, s.bare || s.mirror, s.mirror, true)
 	config.Logger.Debug("Work dir after namedWorkDir: '%s'", path)
-
-	// Ensure directory exists
 	if path == "" {
 		return nil, errors.NewParamError("path cannot be empty")
 	}
-
-	// Create parent directory if needed
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return nil, errors.Wrapf(errors.ErrFail, err, "failed to create parent directory")
 	}
 
-	if err := cloneWithGitCLI(url, path, "", false, false, config.Logger); err != nil {
+	if err := cloneWithGitCLI(s.url, path, s.branch, s.bare, s.mirror, config.Logger); err != nil {
+		if s.branch != "" {
+			return nil, errors.Wrapf(errors.ErrFail, err, "failed to clone branch %s", s.branch)
+		}
 		return nil, err
 	}
 
-	config.Logger.Info("Repository cloned successfully")
-
-	// Add to cache
-	CacheRepo(url, path)
+	config.Logger.Info("Cloned %s successfully", s.kind())
+	CacheRepo(s.cacheKey, path)
 	return NewRepository(path, config)
+}
+
+// a cached branch clone may have been moved since, so it's put back on the branch
+func reuseCached(path, branch string, config *RepoConfig) (*Repository, error) {
+	repo, err := NewRepository(path, config)
+	if err != nil || branch == "" {
+		return repo, err
+	}
+	if current, _ := repo.GetCurrentBranch(); current != branch {
+		if err := repo.CheckoutRef(branch); err != nil {
+			return nil, errors.Wrapf(errors.ErrFail, err, "failed to checkout cached branch %s", branch)
+		}
+	}
+	return repo, nil
 }
 
 // CloneBranch clones a specific branch of a repository
 // Checks cache first to avoid duplicate clones unless force is true
 // If force is true, bypasses cache and clones even if already cached
 func CloneBranch(url, path, branch string, force bool, config *RepoConfig) (*Repository, error) {
-	if config == nil {
-		config = &RepoConfig{
-			Logger: logging.NewLogger(logging.INFO),
-		}
-	}
-
-	// Check cache first (unless force is specified)
-	cacheKey := fmt.Sprintf("%s#%s", url, branch)
-	if !force {
-		if cachedPath, found := GetCachedRepo(cacheKey); found {
-			config.Logger.Info("Repository branch already cached: %s#%s -> %s", url, branch, cachedPath)
-			repo, err := NewRepository(cachedPath, config)
-			if err != nil {
-				return nil, err
-			}
-			// Ensure we're on the right branch
-			currentBranch, _ := repo.GetCurrentBranch()
-			if currentBranch != branch {
-				if err := repo.CheckoutRef(branch); err != nil {
-					return nil, errors.Wrapf(errors.ErrFail, err, "failed to checkout cached branch %s", branch)
-				}
-			}
-			return repo, nil
-		}
-	} else {
-		config.Logger.Info("Force clone enabled, bypassing cache")
-	}
-
-	config.Logger.Info("Cloning branch %s from %s to %s", branch, url, path)
-
-	// Apply namedWorkDir logic - append repo name to path if needed
-	path = NamedWorkDir(path, url, false, false, true)
-	config.Logger.Debug("Work dir after namedWorkDir: '%s'", path)
-
-	// Ensure directory exists
-	if path == "" {
-		return nil, errors.NewParamError("path cannot be empty")
-	}
-
-	// Create parent directory if needed
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return nil, errors.Wrapf(errors.ErrFail, err, "failed to create parent directory")
-	}
-
-	if err := cloneWithGitCLI(url, path, branch, false, false, config.Logger); err != nil {
-		return nil, errors.Wrapf(errors.ErrFail, err, "failed to clone branch %s", branch)
-	}
-
-	config.Logger.Info("Branch %s cloned successfully", branch)
-
-	// Add to cache with branch-specific key
-	CacheRepo(cacheKey, path)
-
-	return NewRepository(path, config)
+	return cloneRepo(cloneSpec{url: url, path: path, branch: branch, cacheKey: url + "#" + branch, force: force}, config)
 }
 
 // CloneBare clones a repository as a bare repository
@@ -434,98 +410,14 @@ func CloneBranch(url, path, branch string, force bool, config *RepoConfig) (*Rep
 // Useful for caching and CI/CD pipelines
 // If force is true, bypasses cache and clones even if already cached
 func CloneBare(url, path string, force bool, config *RepoConfig) (*Repository, error) {
-	if config == nil {
-		config = &RepoConfig{
-			Logger: logging.NewLogger(logging.INFO),
-		}
-	}
-
-	// Check cache first (unless force is specified)
-	cacheKey := fmt.Sprintf("%s#bare", url)
-	if !force {
-		if cachedPath, found := GetCachedRepo(cacheKey); found {
-			config.Logger.Info("Bare repository already cached: %s -> %s", url, cachedPath)
-			return NewRepository(cachedPath, config)
-		}
-	} else {
-		config.Logger.Info("Force clone enabled, bypassing cache")
-	}
-
-	config.Logger.Info("Cloning bare repository from %s to %s", url, path)
-
-	// Apply namedWorkDir logic - append repo name with .bare suffix
-	path = NamedWorkDir(path, url, true, false, true)
-	config.Logger.Debug("Work dir after namedWorkDir: '%s'", path)
-
-	// Ensure directory exists
-	if path == "" {
-		return nil, errors.NewParamError("path cannot be empty")
-	}
-
-	// Create parent directory if needed
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return nil, errors.Wrapf(errors.ErrFail, err, "failed to create parent directory")
-	}
-
-	if err := cloneWithGitCLI(url, path, "", true, false, config.Logger); err != nil {
-		return nil, err
-	}
-
-	config.Logger.Info("Bare repository cloned successfully")
-
-	// Add to cache
-	CacheRepo(cacheKey, path)
-
-	return NewRepository(path, config)
+	return cloneRepo(cloneSpec{url: url, path: path, cacheKey: CacheKey(url, true, false), bare: true, force: force}, config)
 }
 
 // CloneMirror clones a repository as a mirror
 // Mirror repositories include all refs and are suitable for backup/mirroring
 // If force is true, bypasses cache and clones even if already cached
 func CloneMirror(url, path string, force bool, config *RepoConfig) (*Repository, error) {
-	if config == nil {
-		config = &RepoConfig{
-			Logger: logging.NewLogger(logging.INFO),
-		}
-	}
-
-	// Check cache first (unless force is specified)
-	cacheKey := fmt.Sprintf("%s#mirror", url)
-	if !force {
-		if cachedPath, found := GetCachedRepo(cacheKey); found {
-			config.Logger.Info("Mirror repository already cached: %s -> %s", url, cachedPath)
-			return NewRepository(cachedPath, config)
-		}
-	} else {
-		config.Logger.Info("Force clone enabled, bypassing cache")
-	}
-
-	config.Logger.Info("Cloning mirror repository from %s to %s", url, path)
-
-	// Apply namedWorkDir logic - append repo name with .bare suffix (mirrors are bare)
-	path = NamedWorkDir(path, url, true, true, true)
-	config.Logger.Debug("Work dir after namedWorkDir: '%s'", path)
-
-	// Ensure directory exists
-	if path == "" {
-		return nil, errors.NewParamError("path cannot be empty")
-	}
-
-	// Create parent directory if needed
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return nil, errors.Wrapf(errors.ErrFail, err, "failed to create parent directory")
-	}
-
-	if err := cloneWithGitCLI(url, path, "", false, true, config.Logger); err != nil {
-		return nil, err
-	}
-
-	config.Logger.Info("Mirror repository cloned successfully")
-
-	// Add to cache
-	CacheRepo(cacheKey, path)
-
-	return NewRepository(path, config)
+	return cloneRepo(cloneSpec{url: url, path: path, cacheKey: CacheKey(url, false, true), mirror: true, force: force}, config)
 }
 
 // GetCurrentBranch returns the current branch name
@@ -652,39 +544,18 @@ func (r *Repository) Pull(branch string, fetchAll bool) error {
 		return r.pullAll()
 	}
 
-	var pullErr error
-	err := func() error {
-		workTree, err := r.repo.Worktree()
-		if err != nil {
-			return errors.Wrapf(errors.ErrFail, err, "failed to get worktree")
-		}
+	workTree, err := r.repo.Worktree()
+	if err != nil {
+		return errors.Wrapf(errors.ErrFail, err, "failed to get worktree")
+	}
 
-		pullOptions := &git.PullOptions{}
+	pullOptions := &git.PullOptions{Auth: r.auth(), Progress: r.config.ProgressHandler}
+	if branch != "" {
+		pullOptions.RemoteName = "origin"
+		pullOptions.ReferenceName = plumbing.NewBranchReferenceName(branch)
+	}
 
-		// Add specific branch if provided
-		if branch != "" {
-			pullOptions.RemoteName = "origin"
-			pullOptions.ReferenceName = plumbing.NewBranchReferenceName(branch)
-		}
-
-		// Add authentication if provided
-		if r.config.Username != "" && r.config.Token != "" {
-			pullOptions.Auth = &http.BasicAuth{
-				Username: r.config.Username,
-				Password: r.config.Token,
-			}
-		}
-
-		// Add progress handler if provided
-		if r.config.ProgressHandler != nil {
-			pullOptions.Progress = r.config.ProgressHandler
-			r.config.Logger.Debug("Progress reporting enabled for pull operation")
-		}
-
-		pullErr = workTree.Pull(pullOptions)
-		return pullErr
-	}()
-
+	err = workTree.Pull(pullOptions)
 	if err != nil && err != git.NoErrAlreadyUpToDate {
 		return errors.Wrapf(errors.ErrFail, err, "failed to pull")
 	}
@@ -712,16 +583,7 @@ func (r *Repository) pullAll() error {
 		r.config.Logger.Debug("git pull --all output: %s", string(output))
 	}
 
-	// Execute git fetch --all
-	cmd = exec.Command("git", "-C", r.path, "fetch", "--all")
-	output, err = cmd.CombinedOutput()
-	if err != nil {
-		return errors.Wrapf(errors.ErrFail, err, "git fetch --all failed (output: %s)", string(output))
-	}
-
-	r.config.Logger.Debug("git fetch --all output: %s", string(output))
-	r.config.Logger.Info("Successfully fetched all branches")
-	return nil
+	return r.fetchAll()
 }
 
 // fetchAll fetches all branches using git command
@@ -750,28 +612,7 @@ func (r *Repository) Fetch(fetchAll bool) error {
 
 	r.config.Logger.Info("Fetching latest changes from remote")
 
-	var fetchErr error
-	err := func() error {
-		fetchOptions := &git.FetchOptions{}
-
-		// Add authentication if provided
-		if r.config.Username != "" && r.config.Token != "" {
-			fetchOptions.Auth = &http.BasicAuth{
-				Username: r.config.Username,
-				Password: r.config.Token,
-			}
-		}
-
-		// Add progress handler if provided
-		if r.config.ProgressHandler != nil {
-			fetchOptions.Progress = r.config.ProgressHandler
-			r.config.Logger.Debug("Progress reporting enabled for fetch operation")
-		}
-
-		fetchErr = r.repo.Fetch(fetchOptions)
-		return fetchErr
-	}()
-
+	err := r.repo.Fetch(&git.FetchOptions{Auth: r.auth(), Progress: r.config.ProgressHandler})
 	if err != nil && err != git.NoErrAlreadyUpToDate {
 		return errors.Wrapf(errors.ErrFail, err, "failed to fetch")
 	}
@@ -785,21 +626,22 @@ func (r *Repository) Fetch(fetchAll bool) error {
 	return nil
 }
 
+// a typed nil *BasicAuth isn't a nil AuthMethod, so no credentials has to return a plain nil
+func (r *Repository) auth() transport.AuthMethod {
+	if r.config.Username == "" || r.config.Token == "" {
+		return nil
+	}
+	return &http.BasicAuth{
+		Username: r.config.Username,
+		Password: r.config.Token,
+	}
+}
+
 // Push pushes changes to remote
 func (r *Repository) Push() error {
 	r.config.Logger.Info("Pushing changes to remote")
 
-	pushOptions := &git.PushOptions{}
-
-	// Add authentication if provided
-	if r.config.Username != "" && r.config.Token != "" {
-		pushOptions.Auth = &http.BasicAuth{
-			Username: r.config.Username,
-			Password: r.config.Token,
-		}
-	}
-
-	err := r.repo.Push(pushOptions)
+	err := r.repo.Push(&git.PushOptions{Auth: r.auth()})
 	if err != nil && err != git.NoErrAlreadyUpToDate {
 		return errors.Wrapf(errors.ErrFail, err, "failed to push")
 	}
@@ -981,11 +823,7 @@ func IsRepository(path string) bool {
 
 // InitRepository initializes a new Git repository
 func InitRepository(path string, config *RepoConfig) (*Repository, error) {
-	if config == nil {
-		config = &RepoConfig{
-			Logger: logging.NewLogger(logging.INFO),
-		}
-	}
+	config = withDefaults(config)
 
 	config.Logger.Info("Initializing repository at: %s", path)
 
