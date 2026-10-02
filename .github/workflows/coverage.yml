@@ -316,7 +316,7 @@ jobs:
           fi
 
           git commit -m "Update coverage history [skip ci]"
-          git push origin "$COVERAGE_BRANCH"
+          git pull && git push origin "$COVERAGE_BRANCH"
 
   # ===========================================================================
   # COVERAGE BADGE GENERATION
