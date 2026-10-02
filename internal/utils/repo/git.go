@@ -86,40 +86,113 @@ func isUnsafeRepositoryError(err error) bool {
 		strings.Contains(errMsg, "dubious ownership")
 }
 
-// markDirectoryAsSafe adds a directory to git's safe.directory config
-// This is needed when working with repositories mounted as Docker volumes
-func markDirectoryAsSafe(path string, logger *logging.Logger) error {
-	logger.Debug("Git work directory %s detected as unsafe, marking as safe (common with Docker volumes)", path)
-
-	cmd := exec.Command("git", "config", "--global", "--add", "safe.directory", path)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return errors.Wrapf(errors.ErrFail, err, "failed to mark directory as safe (output: %s)", string(output))
+// git names the repo top it refused, which is what safe.directory has to match, older git words it as an unsafe
+// repository, and neither escapes the path, so it runs to where the quote closes on that line
+func unsafeRepositoryPath(err error) (string, bool) {
+	for _, form := range []struct{ open, close string }{
+		{"repository at '", "'"},
+		{"unsafe repository ('", "' is owned by someone else)"},
+	} {
+		_, rest, found := strings.Cut(err.Error(), form.open)
+		if !found {
+			continue
+		}
+		line, _, _ := strings.Cut(rest, "\n")
+		if top, ok := strings.CutSuffix(strings.TrimSuffix(line, "\r"), form.close); ok && top != "" {
+			return top, true
+		}
 	}
-
-	logger.Debug("Successfully marked directory as safe: %s", path)
-	return nil
+	return "", false
 }
 
-// withSafeDirectoryRetry executes a function and retries once if it fails with unsafe repository error
-// Automatically marks the directory as safe before retrying
-func withSafeDirectoryRetry(path string, logger *logging.Logger, fn func() error) error {
-	err := fn()
-	if err != nil && isUnsafeRepositoryError(err) {
-		// Try to mark as safe and retry
-		if markErr := markDirectoryAsSafe(path, logger); markErr != nil {
-			// If we can't mark as safe, return original error
-			return err
-		}
-		// Retry the operation
-		return fn()
+// swapped in tests, another owner can't be made without root
+var fileOwner = lookupOwner
+
+// the repo and its .git need the owner of the folder yago works in, the way git checks them against the current
+// user, so /tmp never vouches for someone else's /tmp/.git, it's the folder and not a file in it because whoever
+// owns the folder can swap its files anyway, and yago running as root in a container rewrites the files it checks out
+func trustedRepository(dir, top string) bool {
+	owner, ok := fileOwner(dir)
+	if !ok {
+		return false
 	}
-	return err
+	entries := []string{top}
+	dotGit := filepath.Join(top, ".git")
+	// like git, .git is followed through a symlink to see whether it's a file naming the gitdir, the gitdir it names
+	// is judged once symlinks are resolved, and .git itself by its own entry
+	if info, err := os.Stat(dotGit); err == nil {
+		entries = append(entries, dotGit)
+		if info.Mode().IsRegular() {
+			gitDir, ok := gitDirFromFile(dotGit, info.Size())
+			if !ok {
+				return false
+			}
+			entries = append(entries, gitDir)
+		}
+	}
+	for _, entry := range entries {
+		if entryOwner, ok := fileOwner(entry); !ok || entryOwner != owner {
+			return false
+		}
+	}
+	return true
+}
+
+// read the way git's read_gitfile_gently does, only line endings come off the end, a relative path is taken from
+// the folder holding .git, and the gitdir is resolved like git's realpath
+func gitDirFromFile(dotGit string, size int64) (string, bool) {
+	if size > 1<<20 {
+		return "", false
+	}
+	data, err := os.ReadFile(filepath.Clean(dotGit))
+	if err != nil {
+		return "", false
+	}
+	gitDir, found := strings.CutPrefix(string(data), "gitdir: ")
+	gitDir = strings.TrimRight(gitDir, "\r\n")
+	if !found || gitDir == "" {
+		return "", false
+	}
+	if !filepath.IsAbs(gitDir) {
+		gitDir = filepath.Dir(dotGit) + string(filepath.Separator) + gitDir
+	}
+	resolved, err := filepath.EvalSymlinks(gitDir)
+	if err != nil {
+		return "", false
+	}
+	return resolved, true
+}
+
+// withSafeDirectoryRetry runs a git command, and if git refuses the repo for its ownership (common with Docker volumes)
+// runs it once more with the extra args, they trust that one repo for that one command so the user's global git config is never written
+func withSafeDirectoryRetry(dir string, logger *logging.Logger, fn func(extraArgs []string) error) error {
+	err := fn(nil)
+	if err == nil || !isUnsafeRepositoryError(err) {
+		return err
+	}
+	top, found := unsafeRepositoryPath(err)
+	if !found {
+		return err
+	}
+	if !trustedRepository(dir, top) {
+		logger.Debug("Git refused %s for its ownership, and it isn't trusted since %s has another owner", top, dir)
+		return err
+	}
+	logger.Debug("Git refused %s for its ownership, retrying with safe.directory set for this command only", top)
+	retryErr := fn([]string{"-c", "safe.directory=" + top})
+	if isUnsafeRepositoryError(retryErr) {
+		// git before 2.38 only reads safe.directory from the system and global config
+		return errors.Wrapf(errors.ErrFail, retryErr, "git still refused %s, trusting it for one command needs git 2.38 or later", top)
+	}
+	return retryErr
 }
 
 // cloneWithGitCLI clones repositories using native git command.
 // This delegates all auth/transport behavior to the host environment and git configuration.
 func cloneWithGitCLI(url, path, branch string, bare, mirror bool, logger *logging.Logger) error {
+	if err := RejectOptionLike("repository URL", url); err != nil {
+		return err
+	}
 	args := []string{"-c", "color.ui=always", "clone", "--progress"}
 
 	if mirror {
@@ -132,7 +205,7 @@ func cloneWithGitCLI(url, path, branch string, bare, mirror bool, logger *loggin
 		args = append(args, "--branch", branch, "--single-branch")
 	}
 
-	args = append(args, url, path)
+	args = append(args, "--", url, path)
 
 	logger.Info("Cloning repository with native git: git %s", strings.Join(args, " "))
 	cmd := exec.Command("git", args...)
@@ -176,15 +249,7 @@ func NewRepository(path string, config *RepoConfig) (*Repository, error) {
 		}
 	}
 
-	var repo *git.Repository
-	var err error
-
-	// Use safe directory retry wrapper
-	err = withSafeDirectoryRetry(path, config.Logger, func() error {
-		repo, err = git.PlainOpen(path)
-		return err
-	})
-
+	repo, err := git.PlainOpen(path)
 	if err != nil {
 		return nil, errors.Wrapf(errors.ErrParse, err, "failed to open repository at %s", path)
 	}
@@ -227,14 +292,7 @@ func Load(workDir string, config *RepoConfig) (*Repository, bool, error) {
 
 	config.Logger.Info("Loading repo: '%s'", absPath)
 
-	// Try to open as a git repository with safe directory retry
-	var repo *git.Repository
-	err = withSafeDirectoryRetry(absPath, config.Logger, func() error {
-		var openErr error
-		repo, openErr = git.PlainOpen(absPath)
-		return openErr
-	})
-
+	repo, err := git.PlainOpen(absPath)
 	if err != nil {
 		// Not a git repo - this is expected behavior, just warn
 		config.Logger.Warn("Not a Git repo, skipping: %s", absPath)
@@ -511,7 +569,7 @@ func (r *Repository) GetCurrentCommitShort() (string, error) {
 func (r *Repository) CheckoutRef(ref string) error {
 	r.config.Logger.Info("Checking out ref: %s", ref)
 
-	err := withSafeDirectoryRetry(r.path, r.config.Logger, func() error {
+	err := func() error {
 		workTree, err := r.repo.Worktree()
 		if err != nil {
 			return errors.Wrapf(errors.ErrFail, err, "failed to get worktree")
@@ -522,7 +580,7 @@ func (r *Repository) CheckoutRef(ref string) error {
 			return err
 		}
 		return workTree.Checkout(opts)
-	})
+	}()
 
 	if err != nil {
 		return errors.Wrapf(errors.ErrFail, err, "failed to checkout ref %s", ref)
@@ -595,7 +653,7 @@ func (r *Repository) Pull(branch string, fetchAll bool) error {
 	}
 
 	var pullErr error
-	err := withSafeDirectoryRetry(r.path, r.config.Logger, func() error {
+	err := func() error {
 		workTree, err := r.repo.Worktree()
 		if err != nil {
 			return errors.Wrapf(errors.ErrFail, err, "failed to get worktree")
@@ -625,7 +683,7 @@ func (r *Repository) Pull(branch string, fetchAll bool) error {
 
 		pullErr = workTree.Pull(pullOptions)
 		return pullErr
-	})
+	}()
 
 	if err != nil && err != git.NoErrAlreadyUpToDate {
 		return errors.Wrapf(errors.ErrFail, err, "failed to pull")
@@ -693,7 +751,7 @@ func (r *Repository) Fetch(fetchAll bool) error {
 	r.config.Logger.Info("Fetching latest changes from remote")
 
 	var fetchErr error
-	err := withSafeDirectoryRetry(r.path, r.config.Logger, func() error {
+	err := func() error {
 		fetchOptions := &git.FetchOptions{}
 
 		// Add authentication if provided
@@ -712,7 +770,7 @@ func (r *Repository) Fetch(fetchAll bool) error {
 
 		fetchErr = r.repo.Fetch(fetchOptions)
 		return fetchErr
-	})
+	}()
 
 	if err != nil && err != git.NoErrAlreadyUpToDate {
 		return errors.Wrapf(errors.ErrFail, err, "failed to fetch")
