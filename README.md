@@ -285,6 +285,61 @@ secret_variables:
 Terraform stores input variable values in saved plan files, and in state when resources use them. Declare these
 variables `sensitive = true`, or `ephemeral = true` if nothing needs to keep the value.
 
+## Terraform Backends
+
+Every Terraform configuration needs to know where its state lives. We used to write that out by hand, one
+`backends/<region>.tfvars.json` per configuration, with the same bucket and KMS key copied into every one of them. Why
+is that a problem? A typo in any one of them points Terraform at the wrong state, and nothing tells us.
+
+So we declare the backend once per region with `terraform_backend`, usually in a part that every configuration of an
+account already loads. yago picks the entry for `--aws-region`, works out the state key and writes
+`.gitops/backend.tfvars.json`.
+
+```yaml
+# shared part, one per account
+terraform_backend:
+  eu-west-1:
+    bucket: example-dev-statefile-euw1
+    dynamodb_table: example-dev-statefile-euw1
+    kms_key_id: 00000000-0000-0000-0000-000000000000
+  key_vars:
+    ecosystem: example-dev
+```
+
+Then each configuration simply says what it is.
+
+```yaml
+# the configuration's own part
+terraform_backend:
+  key_vars:
+    resource_set: shared
+    project: example
+    component: cluster
+```
+
+The key is built from `key_pattern`, which defaults to
+`{ecosystem}/{resource_set}/{project}/{component}/terraform.tfstate`. The placeholders are filled from `key_vars`, and
+`{region}` and `{environment}` are always there. A `key_vars` value can be a lookup into a property another part
+already holds, for example `"[[gitops.getYamlValue(project_properties_proj.project_name_short)]]"`, so the name only
+lives in one place. If a placeholder has no value, yago stops. It does not guess, a half built key would essentially be
+a new empty state.
+
+Some states will not fit the pattern. Fine. Set `key` next to `key_vars` and it is used as it is. It does not go inside
+the region entry, yago stops if it finds one there.
+
+In the region entry only `bucket` is required. `region` defaults to `--aws-region` and `encrypt` to `true`, and
+anything else is passed to the backend as it is - `dynamodb_table`, `use_lockfile`, whatever it might be.
+
+When two parts set the same `terraform_backend` value, the part listed last wins, so a project part listed after a
+shared one can override its `key_pattern`.
+
+But what about the configurations we already have? A backends file listed under `wrappers.terraform.backends` for the
+region is used as it is and `terraform_backend` is ignored. This way no existing state moves until we remove that
+entry.
+
+Then finally, `terraform_backend` is taken out of `.gitops/configuration.tfvars.json`, as Terraform would only warn
+about a variable it doesn't know.
+
 ## Configuration
 
 ### Logging
