@@ -88,6 +88,10 @@ func (p *Parser) LoadGitOpsFilesExtended(
 	}
 	p.SetDesiredState(ds)
 
+	if err := p.loadTerraformVersion(); err != nil {
+		logging.Warn("Could not load terraform version from desiredstate, using default: %s", DefaultTerraformVersion)
+	}
+
 	// Load configuration if provided
 	if configRoot != "" {
 		cfg := wrapper.NewBaseConfiguration(p.GetEnvironment(), "terraform", p.GetEnvVariables())
