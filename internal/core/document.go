@@ -15,6 +15,7 @@ import (
 	"github.com/danieleborsaro/yago/internal/schema"
 	"github.com/danieleborsaro/yago/internal/utils/errors"
 	"github.com/danieleborsaro/yago/internal/utils/logging"
+	"gopkg.in/yaml.v3"
 )
 
 // GitOpsDocument represents a GitOps document with metadata and content handling.
@@ -943,6 +944,29 @@ func (doc *GitOpsDocument) GetMetaRootFile() (string, error) {
 
 // FindAllPartsToLoad finds all parts that need to be loaded
 func (doc *GitOpsDocument) FindAllPartsToLoad(yamlPathToParts string) ([]map[string]interface{}, error) {
+	fullPath := doc.resolvePartsPath(yamlPathToParts)
+
+	// Get the parts section directly
+	partsValue, err := doc.assembledMeta.GetValue(fullPath)
+	if err != nil {
+		// Check if this is a wrapper not found error and provide helpful suggestions
+		if doc.isConfiguration && strings.Contains(fullPath, "wrappers.") {
+			return nil, doc.createWrapperNotFoundError(fullPath, err)
+		}
+		return nil, errors.Wrapf(errors.ErrParse, err, "failed to find parts at path %s", fullPath)
+	}
+
+	// The parts should be a map[string]interface{} where keys are mount points and values are file paths
+	if partsMap, ok := partsValue.(map[string]interface{}); ok {
+		result := []map[string]interface{}{partsMap}
+		return result, nil
+	}
+
+	return nil, errors.Newf(errors.ErrParse, "parts section at %s is not a valid map structure", fullPath)
+}
+
+// resolvePartsPath turns a parts path into the full path from the document root
+func (doc *GitOpsDocument) resolvePartsPath(yamlPathToParts string) string {
 	var fullPath string
 
 	// Handle different path types based on where parts are located
@@ -962,23 +986,70 @@ func (doc *GitOpsDocument) FindAllPartsToLoad(yamlPathToParts string) ([]map[str
 		fullPath = fmt.Sprintf("%s.%s", doc.propertyMeta, yamlPathToParts)
 	}
 
-	// Get the parts section directly
-	partsValue, err := doc.assembledMeta.GetValue(fullPath)
-	if err != nil {
-		// Check if this is a wrapper not found error and provide helpful suggestions
-		if doc.isConfiguration && strings.Contains(fullPath, "wrappers.") {
-			return nil, doc.createWrapperNotFoundError(fullPath, err)
+	return fullPath
+}
+
+// partMountPoints returns a block's mount points in the order parts get merged, the order
+// they're written in the root file, which is what the Python tool did, so a later part wins
+// anything the file doesn't show, an included or generated parts map, comes after, sorted
+func (doc *GitOpsDocument) partMountPoints(yamlPathToParts string, block map[string]interface{}) []string {
+	mountPoints := make([]string, 0, len(block))
+	seen := make(map[string]bool, len(block))
+	for _, key := range declaredKeyOrder(doc.metaFile, doc.resolvePartsPath(yamlPathToParts)) {
+		if _, ok := block[key]; ok && !seen[key] {
+			mountPoints = append(mountPoints, key)
+			seen[key] = true
 		}
-		return nil, errors.Wrapf(errors.ErrParse, err, "failed to find parts at path %s", fullPath)
 	}
 
-	// The parts should be a map[string]interface{} where keys are mount points and values are file paths
-	if partsMap, ok := partsValue.(map[string]interface{}); ok {
-		result := []map[string]interface{}{partsMap}
-		return result, nil
+	declared := len(mountPoints)
+	for key := range block {
+		if !seen[key] {
+			mountPoints = append(mountPoints, key)
+		}
+	}
+	sort.Strings(mountPoints[declared:])
+
+	return mountPoints
+}
+
+// declaredKeyOrder reads the keys of the mapping at a dotted path as written in a YAML file
+// nil when the file or the path can't be read, callers fall back to sorted keys
+func declaredKeyOrder(file, dottedPath string) []string {
+	data, err := os.ReadFile(file)
+	if err != nil {
+		return nil
+	}
+	var root yaml.Node
+	if err := yaml.Unmarshal(data, &root); err != nil || len(root.Content) == 0 {
+		return nil
 	}
 
-	return nil, errors.Newf(errors.ErrParse, "parts section at %s is not a valid map structure", fullPath)
+	node := root.Content[0]
+	for _, segment := range strings.Split(dottedPath, ".") {
+		var next *yaml.Node
+		if node.Kind == yaml.MappingNode {
+			for i := 0; i+1 < len(node.Content); i += 2 {
+				if node.Content[i].Value == segment {
+					next = node.Content[i+1]
+					break
+				}
+			}
+		}
+		if next == nil {
+			return nil
+		}
+		node = next
+	}
+	if node.Kind != yaml.MappingNode {
+		return nil
+	}
+
+	keys := make([]string, 0, len(node.Content)/2)
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		keys = append(keys, node.Content[i].Value)
+	}
+	return keys
 }
 
 // createWrapperNotFoundError creates a user-friendly error when a wrapper is not found
@@ -1034,8 +1105,8 @@ func (doc *GitOpsDocument) GetAllPartFiles(yamlPathToParts string) ([]map[string
 
 	for _, block := range partBlocks {
 		// Each block is the parts map where keys are mount points and values are file paths
-		for mountPoint, value := range block {
-			if partFile, ok := value.(string); ok {
+		for _, mountPoint := range doc.partMountPoints(yamlPathToParts, block) {
+			if partFile, ok := block[mountPoint].(string); ok {
 				// For desiredstate documents, skip the 'self' part as it's the main file we already loaded
 				// For configuration documents, include all parts including 'self'
 				if doc.isDesiredState && mountPoint == "self" {
