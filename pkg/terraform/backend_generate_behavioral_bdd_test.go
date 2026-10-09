@@ -183,6 +183,33 @@ func TestTerraformBackend_ListedBackendsFileWins_BehavioralBDD(t *testing.T) {
 	}
 }
 
+func TestTerraformBackend_BrokenBackendsEntryStops_BehavioralBDD(t *testing.T) {
+	contract := BehavioralContract{
+		Behavior:        "Stop when a backends entry is listed for the region but isn't a file path",
+		CurrentImpl:     "Parser.extractBackendPath returns an error for a listed entry that is empty or not a string",
+		ExpectedOutcome: "Assemble fails and names the entry, and no backend is generated from terraform_backend",
+		Rationale:       "A listed entry means the state hasn't migrated, so a typo there must not move it to a generated key",
+	}
+	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
+
+	// Given: a configuration whose backends entry was emptied, next to a shared declaration
+	files := map[string]string{
+		"example/cluster/configuration.yaml": exampleBackendConfiguration(`
+      backends:
+        eu-west-1: ""`),
+		"shared/example-dev/backend.yaml": exampleSharedBackend,
+		"example/cluster/terraform.yaml":  "---\nterraform_backend:\n  key: example.tfstate\n",
+	}
+
+	// When: the configuration is assembled
+	_, err := assembleExampleBackend(t, "eu-west-1", files)
+
+	// Then: it fails on the entry
+	if err == nil || !strings.Contains(err.Error(), "must be the path of a backends file") {
+		t.Fatalf("err = %v, want it to reject the backends entry", err)
+	}
+}
+
 func TestTerraformBackend_NoBackendForRegion_BehavioralBDD(t *testing.T) {
 	contract := BehavioralContract{
 		Behavior:        "Stop when neither a backends file nor a terraform_backend entry covers the region",
