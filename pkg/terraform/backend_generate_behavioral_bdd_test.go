@@ -261,6 +261,21 @@ func TestTerraformBackend_StateKey_BehavioralBDD(t *testing.T) {
 			wantErr: "no value for typo",
 		},
 		{
+			name: "pattern with an unclosed placeholder",
+			declaration: map[string]interface{}{
+				"eu-west-1": region, "key_vars": identity, "key_pattern": "{ecosystem/{project}.tfstate",
+			},
+			wantErr: "still has a brace",
+		},
+		{
+			name: "key inside the region entry",
+			declaration: map[string]interface{}{
+				"eu-west-1": map[string]interface{}{"bucket": "example-dev-statefile-euw1", "key": "legacy.tfstate"},
+				"key_vars":  identity,
+			},
+			wantErr: "eu-west-1.key isn't read",
+		},
+		{
 			name:        "key_vars value that isn't a string",
 			declaration: map[string]interface{}{"eu-west-1": region, "key_vars": map[string]interface{}{"project": 1}},
 			wantErr:     "key_vars.project must be a string",

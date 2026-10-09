@@ -70,9 +70,17 @@ func generateBackend(declaration map[string]interface{}, region, environment str
 		return nil, fmt.Errorf("%s.%s.bucket is required", backendDeclarationKey, region)
 	}
 
+	// a key pasted in from an old backends file would be quietly swapped for the pattern one, so we stop instead
+	if _, set := entry["key"]; set {
+		return nil, fmt.Errorf("%s.%s.key isn't read, set %s.key instead", backendDeclarationKey, region, backendDeclarationKey)
+	}
+
 	key, err := backendKey(declaration, region, environment)
 	if err != nil {
 		return nil, err
+	}
+	if strings.ContainsAny(key, "{}") {
+		return nil, fmt.Errorf("%s state key %q still has a brace in it", backendDeclarationKey, key)
 	}
 
 	backend := map[string]interface{}{"region": region, "encrypt": true}
