@@ -186,7 +186,7 @@ func (p *Parser) loadBackendForRegion(awsRegion string) error {
 
 	backendPath := p.extractBackendPath(cfgMeta.Data, cfgDoc.GetSchemaVersion(), awsRegion)
 	if backendPath == "" {
-		logging.Warn("No backend configuration found for region: %s", awsRegion)
+		logging.Debug("No backends file listed for region: %s", awsRegion)
 		return nil
 	}
 
@@ -314,7 +314,7 @@ func (p *Parser) extractBackendPath(configMeta map[string]interface{}, schemaVer
 
 	backendValue, err := handler.GetValue(configMeta, backendLocator)
 	if err != nil {
-		logging.Warn("extractBackendPath: backend path not found at '%s': %v", backendLocator, err)
+		logging.Debug("extractBackendPath: backend path not found at '%s': %v", backendLocator, err)
 		return ""
 	}
 
@@ -330,6 +330,10 @@ func (p *Parser) extractBackendPath(configMeta map[string]interface{}, schemaVer
 // LoadBackendConfig loads backend configuration for the specified region.
 func (p *Parser) LoadBackendConfig(schemaPath string, awsRegion string) error {
 	return p.backendManager.LoadBackendConfig(schemaPath, awsRegion)
+}
+
+func (p *Parser) UseGeneratedBackend(raw map[string]interface{}) {
+	p.backendManager.UseGenerated(raw)
 }
 
 // CacheBackendConfig generates the backend.tfvars.json file.
