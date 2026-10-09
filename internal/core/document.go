@@ -1016,7 +1016,7 @@ func (doc *GitOpsDocument) partMountPoints(yamlPathToParts string, block map[str
 // declaredKeyOrder reads the keys of the mapping at a dotted path as written in a YAML file
 // nil when the file or the path can't be read, callers fall back to sorted keys
 func declaredKeyOrder(file, dottedPath string) []string {
-	data, err := os.ReadFile(file)
+	data, err := os.ReadFile(file) //nolint:gosec // the root document yago was already told to load
 	if err != nil {
 		return nil
 	}
