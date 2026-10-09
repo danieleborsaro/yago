@@ -148,6 +148,43 @@ terraform_backend:
 	}
 }
 
+func TestTerraformBackend_KeyVarsFromSharedProperties_BehavioralBDD(t *testing.T) {
+	contract := BehavioralContract{
+		Behavior:        "Fill key_vars with lookups into properties that other parts already hold",
+		CurrentImpl:     "Lookups are resolved while the configuration is assembled, before Service.PostCache reads terraform_backend",
+		ExpectedOutcome: "The state key is rendered from the looked up values",
+		Rationale:       "Project and ecosystem names already live in shared property parts, and a second copy would drift",
+	}
+	t.Logf("BEHAVIORAL CONTRACT: %s", contract.Behavior)
+
+	// Given: a shared part with project properties, and key_vars that look them up
+	files := map[string]string{
+		"example/cluster/configuration.yaml": exampleBackendConfiguration(""),
+		"shared/example-dev/backend.yaml": exampleSharedBackend + `
+project_properties_proj:
+  project_name_short: example
+`,
+		"example/cluster/terraform.yaml": `---
+terraform_backend:
+  key_pattern: "{project}/{name}/{region}/terraform.tfstate"
+  key_vars:
+    project: "[[gitops.getYamlValue(project_properties_proj.project_name_short)]]"
+    name: cluster
+`,
+	}
+
+	// When: the configuration is assembled
+	resp, err := assembleExampleBackend(t, "eu-west-1", files)
+
+	// Then: the key uses the looked up project name
+	if err != nil {
+		t.Fatal(err)
+	}
+	if key := readJSONFile(t, resp.BackendFile)["key"]; key != "example/cluster/eu-west-1/terraform.tfstate" {
+		t.Errorf("key = %v, want example/cluster/eu-west-1/terraform.tfstate", key)
+	}
+}
+
 func TestTerraformBackend_ListedBackendsFileWins_BehavioralBDD(t *testing.T) {
 	contract := BehavioralContract{
 		Behavior:        "Keep using a listed backends file when a terraform_backend declaration also exists",
