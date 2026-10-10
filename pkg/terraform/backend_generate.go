@@ -19,6 +19,22 @@ const (
 
 var backendKeyPlaceholder = regexp.MustCompile(`\{[^{}]+\}`)
 
+// every key of the declaration that isn't one of these is a region
+var backendDeclarationSettings = []string{"bucket_name", "encryption", "key", "key_pattern", "key_vars", "lifecycle", "policy"}
+
+// nil when the assembled configuration declares no backend
+func backendDeclarationOf(configuration map[string]interface{}) (map[string]interface{}, error) {
+	raw, exists := configuration[backendDeclarationKey]
+	if !exists {
+		return nil, nil
+	}
+	declaration, ok := raw.(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("%s must be a map of regions", backendDeclarationKey)
+	}
+	return declaration, nil
+}
+
 // terraform complains about variables it doesn't know, so we take the declaration out of the var file
 func takeBackendDeclaration(configPath string, generateJSON bool) (map[string]interface{}, error) {
 	if configPath == "" {
@@ -32,13 +48,9 @@ func takeBackendDeclaration(configPath string, generateJSON bool) (map[string]in
 	if err := yaml.Unmarshal(data, &doc); err != nil {
 		return nil, fmt.Errorf("cannot parse assembled Terraform configuration: %w", err)
 	}
-	raw, exists := doc[backendDeclarationKey]
-	if !exists {
-		return nil, nil
-	}
-	declaration, ok := raw.(map[string]interface{})
-	if !ok {
-		return nil, fmt.Errorf("%s must be a map of regions", backendDeclarationKey)
+	declaration, err := backendDeclarationOf(doc)
+	if err != nil || declaration == nil {
+		return nil, err
 	}
 
 	delete(doc, backendDeclarationKey)
@@ -56,8 +68,8 @@ func takeBackendDeclaration(configPath string, generateJSON bool) (map[string]in
 	return declaration, nil
 }
 
-// nothing back means the region simply isn't declared, the caller still fails if there's no backend at all
-func generateBackend(declaration map[string]interface{}, region, environment string) (map[string]interface{}, error) {
+// the region's entry as it is declared, nil when the region isn't
+func backendEntry(declaration map[string]interface{}, region string) (map[string]interface{}, error) {
 	raw, exists := declaration[region]
 	if !exists {
 		return nil, nil
@@ -66,13 +78,25 @@ func generateBackend(declaration map[string]interface{}, region, environment str
 	if !ok {
 		return nil, fmt.Errorf("%s.%s must be a map with at least a bucket", backendDeclarationKey, region)
 	}
-	if bucket, _ := entry["bucket"].(string); bucket == "" {
-		return nil, fmt.Errorf("%s.%s.bucket is required", backendDeclarationKey, region)
-	}
 
-	// a key pasted in from an old backends file would be quietly swapped for the pattern one, so we stop instead
-	if _, set := entry["key"]; set {
-		return nil, fmt.Errorf("%s.%s.key isn't read, set %s.key instead", backendDeclarationKey, region, backendDeclarationKey)
+	// a setting pasted into the entry, a key from an old backends file say, would go to terraform as a backend argument
+	// and be quietly ignored here, so we stop instead
+	for _, name := range backendDeclarationSettings {
+		if _, set := entry[name]; set {
+			return nil, fmt.Errorf("%s.%s.%s isn't read, set %s.%s instead", backendDeclarationKey, region, name, backendDeclarationKey, name)
+		}
+	}
+	return entry, nil
+}
+
+// nothing back means the region simply isn't declared, the caller still fails if there's no backend at all
+func generateBackend(declaration map[string]interface{}, region, environment string) (map[string]interface{}, error) {
+	entry, err := backendEntry(declaration, region)
+	if err != nil || entry == nil {
+		return nil, err
+	}
+	if bucket, _ := entry["bucket"].(string); bucket == "" {
+		return nil, fmt.Errorf("%s.%s.bucket is required, yago tf backend create names and makes one", backendDeclarationKey, region)
 	}
 
 	key, err := backendKey(declaration, region, environment)
