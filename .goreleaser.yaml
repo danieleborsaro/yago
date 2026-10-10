@@ -76,5 +76,5 @@ brews:
       #   enabled: true
 
     homepage: "https://github.com/danieleborsaro/homebrew-devops"
-    description: "A GitOps tool for non-kubernetes platforms"
+    description: "GitOps tool for non-kubernetes platforms"
     license: "Apache-2.0"
