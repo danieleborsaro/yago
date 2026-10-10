@@ -11,6 +11,7 @@ import (
 
 	"github.com/danieleborsaro/yago/internal/core"
 	"github.com/danieleborsaro/yago/internal/utils/logging"
+	"github.com/danieleborsaro/yago/pkg/wrapper"
 	"github.com/spf13/cobra"
 )
 
@@ -50,6 +51,9 @@ type commonFlags struct {
 	configurationRoot string // -c, --configuration-root
 	configRepoWorkdir string // --configuration-repo-workdir
 	environment       string // -e, --environment
+
+	// not a flag, read from the desiredstate once it's loaded
+	terraformVersion string
 }
 
 // addCommonFlags adds common flags to a command
@@ -454,6 +458,9 @@ func newTerraformCommandService(flags *commonFlags, codeDir string) *Service {
 	service := NewService(codeDir, false)
 	service.SetAWSProfile(flags.awsProfile)
 	service.SetAWSRegion(flags.awsRegion)
+	if flags.terraformVersion != "" {
+		service.SetTerraformVersion(flags.terraformVersion)
+	}
 	return service
 }
 
@@ -475,6 +482,7 @@ func prepareTerraformAssembledInputs(flags *commonFlags) (*TerraformAssembleResp
 	if err != nil {
 		return nil, err
 	}
+	flags.terraformVersion = resp.TerraformVersion
 
 	logging.Info("Assembled desiredstate: '%s'", resp.DesiredStateFile)
 	logging.Info("Assembled config:       '%s'", resp.ConfigurationFile)
@@ -814,6 +822,7 @@ func runProvision(flags *commonFlags, isDryRun bool) error {
 		if err != nil {
 			return fmt.Errorf("failed to load GitOps files: %w", err)
 		}
+		flags.terraformVersion = parser.GetTerraformVersion()
 		if parser.IsClonedSourceCode() {
 			codeDir = parser.GetSourceCodeDir()
 		}
@@ -885,6 +894,24 @@ func runDestroyWithPlan(flags *commonFlags, isDryRun bool) error {
 	codeDir := flags.terraformSource
 	if codeDir == "" {
 		return fmt.Errorf("terraform source directory not specified")
+	}
+
+	// the saved plan needs nothing else from the desired state, only the version to hold terraform to
+	if flags.desiredstateRoot != "" {
+		envVars := map[string]string{
+			"AWS_PROFILE": flags.awsProfile,
+			"AWS_REGION":  flags.awsRegion,
+		}
+		ds := wrapper.NewBaseDesiredState(flags.environment, "terraform", envVars)
+		if err := ds.LoadGitOpsFile(flags.desiredstateRoot); err != nil {
+			return fmt.Errorf("failed to load desiredstate: %w", err)
+		}
+		parser := NewParser(flags.environment, envVars)
+		parser.SetDesiredState(ds)
+		if err := parser.loadTerraformVersion(); err != nil {
+			logging.Warn("Could not load terraform version from desiredstate, using default: %s", DefaultTerraformVersion)
+		}
+		flags.terraformVersion = parser.GetTerraformVersion()
 	}
 
 	// Create service

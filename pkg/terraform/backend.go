@@ -103,13 +103,17 @@ func (bm *BackendManager) LoadBackendConfig(schemaPath string, awsRegion string)
 	return nil
 }
 
+func (bm *BackendManager) UseGenerated(raw map[string]interface{}) {
+	bm.config = &BackendConfig{raw: raw}
+}
+
 // Cache generates the backend.tfvars.json file from the loaded configuration.
 // - Creates tempfile or file in buildDirectory
 // - Writes JSON (if generateJSON) or YAML
 // - Sets backendBufferFile path
 func (bm *BackendManager) Cache(buildDirectory string, generateJSON bool) error {
 	if bm.config == nil {
-		return errors.New(errors.ErrConfigurationMissing, "backend configuration not loaded, call LoadBackendConfig first")
+		return errors.New(errors.ErrConfigurationMissing, "no backend configuration for this region, list a backends file or declare terraform_backend for it")
 	}
 
 	logging.Debug("Caching backend configuration to build directory: %s", buildDirectory)

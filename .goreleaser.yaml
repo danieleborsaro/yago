@@ -61,21 +61,20 @@ changelog:
 
 brews:
   - name: yago
+    directory: "Formula"
+
     repository:
       owner: danieleborsaro
-      name: homebrew-gitops
-      # Define a unique branch name for each release tag
-      branch: "release-{{ .Tag }}"
+      name: homebrew-devops
       token: "{{ .Env.TAP_GITHUB_TOKEN }}"
 
-    # Enable Pull Request creation
-    pull_request:
-      enabled: true
-      base:
-        owner: danieleborsaro
-        name: homebrew-gitops
-        branch: main
+      branch: main
 
-    homepage: "https://github.com/danieleborsaro/homebrew-gitops"
-    description: "Yago is a GitOps tool for non-kubernetes platforms"
+      # ## Enable Pull Request creation
+      # branch: "release-{{ .Tag }}"
+      # pull_request:
+      #   enabled: true
+
+    homepage: "https://github.com/danieleborsaro/homebrew-devops"
+    description: "GitOps tool for non-kubernetes platforms"
     license: "Apache-2.0"

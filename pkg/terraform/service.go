@@ -19,7 +19,8 @@ import (
 
 const (
 	// DefaultTerraformVersion is the default Terraform version if not specified in desiredstate
-	DefaultTerraformVersion = "1.5.1"
+	// major only, so a desiredstate that pins nothing accepts any 1.x
+	DefaultTerraformVersion = "1"
 )
 
 // Service extends BaseService with terraform-specific operations.
@@ -111,6 +112,7 @@ type TerraformAssembleResponse struct {
 	CodeDirectory    string
 	BackendFile      string
 	SourceCodeCloned bool
+	TerraformVersion string
 }
 
 // AssembleTerraform performs terraform-specific assemble orchestration via BaseService.
@@ -177,6 +179,7 @@ func (s *Service) AssembleTerraform(req TerraformAssembleRequest) (*TerraformAss
 		CodeDirectory:    codeDir,
 		BackendFile:      parser.GetBackendFilePath(),
 		SourceCodeCloned: parser.IsClonedSourceCode(),
+		TerraformVersion: parser.GetTerraformVersion(),
 	}, nil
 }
 
@@ -207,6 +210,9 @@ func (s *Service) PostCache(req wrapper.AssembleRequest, response *wrapper.Assem
 	}
 
 	generateJSON := req.OutputFormat == "json"
+	if err := s.applyBackendDeclaration(req.Environment, response.ConfigurationFile, generateJSON); err != nil {
+		return errors.Wrap(errors.ErrConfigurationMalformed, "failed to generate terraform backend configuration", err)
+	}
 	if err := s.assembleParser.CacheBackendConfig(req.CacheDirectory, generateJSON); err != nil {
 		return errors.Wrapf(errors.ErrFail, err, "failed to cache terraform backend configuration")
 	}
@@ -220,6 +226,25 @@ func (s *Service) PostCache(req wrapper.AssembleRequest, response *wrapper.Assem
 		return errors.Wrap(errors.ErrFail, "failed to prepare Terraform secret references", err)
 	}
 
+	return nil
+}
+
+// a listed backends file always wins, this way a shared terraform_backend can't move a state we already have
+func (s *Service) applyBackendDeclaration(environment, configPath string, generateJSON bool) error {
+	declaration, err := takeBackendDeclaration(configPath, generateJSON)
+	if err != nil || declaration == nil {
+		return err
+	}
+	if s.assembleParser.GetBackendConfig() != nil {
+		logging.Debug("Backends file listed for region %s, ignoring %s", s.awsRegion, backendDeclarationKey)
+		return nil
+	}
+	backend, err := generateBackend(declaration, s.awsRegion, environment)
+	if err != nil || backend == nil {
+		return err
+	}
+	logging.Info("Generated backend for region %s with state key %s", s.awsRegion, backend["key"])
+	s.assembleParser.UseGeneratedBackend(backend)
 	return nil
 }
 
@@ -700,21 +725,32 @@ func (s *Service) CheckDependencies() error {
 
 	logging.Info("Installed terraform version: %s", installedVersion)
 
-	// Compare with required version
-	// We only check major version compatibility (e.g., 1.x is compatible with 1.y)
-	// Minor version differences are not treated as a mismatch
-	requiredVersion := s.tfVersion
-	installedMajor := strings.Split(installedVersion, ".")[0]
-	requiredMajor := strings.Split(requiredVersion, ".")[0]
-
-	if installedMajor != requiredMajor {
+	if !versionSatisfies(installedVersion, s.tfVersion) {
 		return errors.Newf(errors.ErrMissingTool,
-			"terraform major version mismatch: installed %s.x, required %s.x",
-			installedMajor, requiredMajor)
+			"terraform version mismatch: installed %s, required %s",
+			installedVersion, s.tfVersion)
 	}
 
 	logging.Info("Terraform ok")
 	return nil
+}
+
+// versionSatisfies reports whether installed matches every part required spells out,
+// so 1 and 1.6 accept 1.6.5 while 1.6.3 only accepts 1.6.3
+// compared part by part, a plain prefix would let 1.6 accept 1.60.0
+func versionSatisfies(installed, required string) bool {
+	installedParts := strings.Split(installed, ".")
+	requiredParts := strings.Split(strings.TrimPrefix(strings.TrimSpace(required), "v"), ".")
+	if len(requiredParts) > len(installedParts) {
+		return false
+	}
+	for i, part := range requiredParts {
+		if installedParts[i] != part {
+			return false
+		}
+	}
+	// a full pin has nothing left to accept, so 1.6.3 turns down 1.6.3.4
+	return len(requiredParts) < 3 || len(installedParts) == len(requiredParts)
 }
 
 // Reset cleans the terraform state directory (.terraform) to start fresh.

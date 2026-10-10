@@ -255,6 +255,8 @@ jobs:
       contents: write
     needs: full-coverage
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+    env:
+      COVERAGE_BRANCH: "coverage-history"
 
     steps:
       - name: Checkout code
@@ -269,11 +271,18 @@ jobs:
 
       - name: Store coverage in history
         run: |
-          mkdir -p .coverage-history
           DATE=$(date +%Y-%m-%d)
           COMMIT=$(git rev-parse --short HEAD)
           COVERAGE=$(go tool cover -func=coverage.out | grep total: | awk '{print $3}' | sed 's/%//')
 
+          git fetch --all
+          if git show-ref --verify --quiet "refs/remotes/origin/$COVERAGE_BRANCH"; then
+            git checkout -B "$COVERAGE_BRANCH" "origin/$COVERAGE_BRANCH"
+          else
+            git checkout -B "$COVERAGE_BRANCH"
+          fi
+
+          mkdir -p .coverage-history
           echo "$DATE,$COMMIT,$COVERAGE" >> .coverage-history/coverage.csv
 
       - name: Generate coverage trend chart
@@ -294,7 +303,6 @@ jobs:
         env:
           GPG_PRIVATE_KEY: ${{ secrets.PUSH_GPG_PRIVATE_KEY }}
           GPG_KEY_ID: ${{ secrets.PUSH_GPG_KEY_ID }}
-          COVERAGE_BRANCH: "coverage-history" # Your target branch name
         run: |
           echo "$GPG_PRIVATE_KEY" | gpg --batch --import
 
@@ -303,11 +311,6 @@ jobs:
           git config --local user.signingkey "$GPG_KEY_ID"
           git config --local commit.gpgsign true
 
-          # Fetch remote branches and switch to the target branch (create it if missing)
-          git fetch --all
-          git checkout -B "$COVERAGE_BRANCH"
-
-          # Stage the coverage file (it carries over when you switch branches)
           git add .coverage-history/coverage.csv
 
           if git diff --cached --quiet; then
