@@ -188,9 +188,12 @@ func (p *Parser) loadBackendForRegion(awsRegion string) error {
 		return nil
 	}
 
-	backendPath := p.extractBackendPath(cfgMeta.Data, cfgDoc.GetSchemaVersion(), awsRegion)
+	backendPath, err := p.extractBackendPath(cfgMeta.Data, cfgDoc.GetSchemaVersion(), awsRegion)
+	if err != nil {
+		return err
+	}
 	if backendPath == "" {
-		logging.Warn("No backend configuration found for region: %s", awsRegion)
+		logging.Debug("No backends file listed for region: %s", awsRegion)
 		return nil
 	}
 
@@ -306,11 +309,11 @@ func (p *Parser) loadTerraformVersion() error {
 
 // extractBackendPath extracts the backend file path from configuration metadata.
 // Uses schema-defined x-gitops-paths.configuration.wrappers to avoid hardcoded paths.
-func (p *Parser) extractBackendPath(configMeta map[string]interface{}, schemaVersion string, awsRegion string) string {
+func (p *Parser) extractBackendPath(configMeta map[string]interface{}, schemaVersion string, awsRegion string) (string, error) {
 	wrappersPath, err := wrapper.DiscoverPropertyPath(configMeta, schemaVersion, false, "wrappers")
 	if err != nil {
 		logging.Warn("extractBackendPath: unable to resolve 'wrappers' path from x-gitops-paths: %v", err)
-		return ""
+		return "", nil
 	}
 
 	backendLocator := wrappersPath + ".terraform.backends." + awsRegion
@@ -318,22 +321,26 @@ func (p *Parser) extractBackendPath(configMeta map[string]interface{}, schemaVer
 
 	backendValue, err := handler.GetValue(configMeta, backendLocator)
 	if err != nil {
-		logging.Warn("extractBackendPath: backend path not found at '%s': %v", backendLocator, err)
-		return ""
+		logging.Debug("extractBackendPath: backend path not found at '%s': %v", backendLocator, err)
+		return "", nil
 	}
 
+	// if an entry is listed the state hasn't moved over yet, so a broken one stops here rather than getting a generated key
 	backendPath, ok := backendValue.(string)
 	if !ok || backendPath == "" {
-		logging.Warn("extractBackendPath: value at '%s' is not a non-empty string", backendLocator)
-		return ""
+		return "", errors.Newf(errors.ErrConfigurationMalformed, "'%s' must be the path of a backends file", backendLocator)
 	}
 
-	return backendPath
+	return backendPath, nil
 }
 
 // LoadBackendConfig loads backend configuration for the specified region.
 func (p *Parser) LoadBackendConfig(schemaPath string, awsRegion string) error {
 	return p.backendManager.LoadBackendConfig(schemaPath, awsRegion)
+}
+
+func (p *Parser) UseGeneratedBackend(raw map[string]interface{}) {
+	p.backendManager.UseGenerated(raw)
 }
 
 // CacheBackendConfig generates the backend.tfvars.json file.

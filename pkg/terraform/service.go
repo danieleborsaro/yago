@@ -210,6 +210,9 @@ func (s *Service) PostCache(req wrapper.AssembleRequest, response *wrapper.Assem
 	}
 
 	generateJSON := req.OutputFormat == "json"
+	if err := s.applyBackendDeclaration(req.Environment, response.ConfigurationFile, generateJSON); err != nil {
+		return errors.Wrap(errors.ErrConfigurationMalformed, "failed to generate terraform backend configuration", err)
+	}
 	if err := s.assembleParser.CacheBackendConfig(req.CacheDirectory, generateJSON); err != nil {
 		return errors.Wrapf(errors.ErrFail, err, "failed to cache terraform backend configuration")
 	}
@@ -223,6 +226,25 @@ func (s *Service) PostCache(req wrapper.AssembleRequest, response *wrapper.Assem
 		return errors.Wrap(errors.ErrFail, "failed to prepare Terraform secret references", err)
 	}
 
+	return nil
+}
+
+// a listed backends file always wins, this way a shared terraform_backend can't move a state we already have
+func (s *Service) applyBackendDeclaration(environment, configPath string, generateJSON bool) error {
+	declaration, err := takeBackendDeclaration(configPath, generateJSON)
+	if err != nil || declaration == nil {
+		return err
+	}
+	if s.assembleParser.GetBackendConfig() != nil {
+		logging.Debug("Backends file listed for region %s, ignoring %s", s.awsRegion, backendDeclarationKey)
+		return nil
+	}
+	backend, err := generateBackend(declaration, s.awsRegion, environment)
+	if err != nil || backend == nil {
+		return err
+	}
+	logging.Info("Generated backend for region %s with state key %s", s.awsRegion, backend["key"])
+	s.assembleParser.UseGeneratedBackend(backend)
 	return nil
 }
 
