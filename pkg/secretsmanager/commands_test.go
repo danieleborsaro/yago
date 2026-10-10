@@ -491,6 +491,7 @@ project_properties_global:
   company_name_short: foo
   custom_tags_verbatim:
     ManagedBy: terraform
+    Team: example
 `,
 		"example/shared/project-properties.yaml": `---
 project_properties_proj:
@@ -518,11 +519,12 @@ secrets:
 		t.Fatal(err)
 	}
 
+	// the secrets merge deep, a map set in two scopes keeps the keys of both
 	want := map[string]interface{}{
 		"company_name_short":   "foo",
 		"owner":                "team@example.com",
 		"role":                 "secrets",
-		"custom_tags_verbatim": map[string]interface{}{"ManagedBy": "yago"},
+		"custom_tags_verbatim": map[string]interface{}{"ManagedBy": "yago", "Team": "example"},
 	}
 	if got := response.AssembledConfigurationContent["project_properties"]; !reflect.DeepEqual(got, want) {
 		t.Fatalf("got project_properties %v, want %v", got, want)

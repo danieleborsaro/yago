@@ -2,13 +2,17 @@ package aws
 
 import (
 	"fmt"
+	"maps"
 	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	kmstypes "github.com/aws/aws-sdk-go-v2/service/kms/types"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
+	"gopkg.in/yaml.v3"
 
 	"github.com/danieleborsaro/yago/internal/utils/errors"
 )
@@ -18,6 +22,7 @@ import (
 const (
 	ResourceTypeSecret = "AWS::SecretsManager::Secret" //nolint:gosec // a resource type, not a credential
 	ResourceTypeKmsKey = "AWS::KMS::Key"
+	ResourceTypeBucket = "AWS::S3::Bucket"
 )
 
 const (
@@ -32,7 +37,10 @@ const (
 	maxTags                = 50
 )
 
-var environmentClasses = []string{"development", "preproduction", "production", "management", "undefined"}
+// the code is the letter the provider puts in a name for an account of that class
+var environmentClasses = []struct{ name, code string }{
+	{"development", "d"}, {"preproduction", "e"}, {"production", "p"}, {"management", "m"}, {"undefined", "u"},
+}
 
 type AccountCoding struct {
 	Class         string `json:"class" yaml:"class"`
@@ -42,24 +50,62 @@ type AccountCoding struct {
 }
 
 type TagConfiguration struct {
-	Account            string
-	AccountsCoding     map[string]AccountCoding
-	CompanyNameShort   string
-	AppEcosystem       string
-	AppEnvironment     string
-	InfraEnvironment   string
-	ProjectNameLong    string
-	ResourceSetLong    string
-	Role               string
-	RoleExtend         string
-	Owner              string
-	CostCentre         string
-	Compliance         string
-	Description        string
-	CustomTags         map[string]string
-	CustomTagsVerbatim map[string]string
-	TerraformModule    string
-	TerraformWorkspace string
+	Account            string                   `yaml:"-"`
+	AccountsCoding     map[string]AccountCoding `yaml:"accounts_coding"`
+	CompanyNameShort   string                   `yaml:"company_name_short"`
+	AppEcosystem       string                   `yaml:"app_ecosystem"`
+	AppEnvironment     string                   `yaml:"app_environment"`
+	InfraEnvironment   string                   `yaml:"infra_environment"`
+	ProjectNameLong    string                   `yaml:"project_name_long"`
+	ProjectNameShort   string                   `yaml:"project_name_short"`
+	ResourceSetLong    string                   `yaml:"resource_set_long"`
+	ResourceSetShort   string                   `yaml:"resource_set_short"`
+	Role               string                   `yaml:"role"`
+	RoleExtend         string                   `yaml:"-"`
+	Owner              string                   `yaml:"owner"`
+	CostCentre         string                   `yaml:"cost_centre"`
+	Compliance         string                   `yaml:"compliance"`
+	Description        string                   `yaml:"description"`
+	CustomTags         map[string]string        `yaml:"custom_tags"`
+	CustomTagsVerbatim map[string]string        `yaml:"custom_tags_verbatim"`
+	TerraformModule    string                   `yaml:"-"`
+	TerraformWorkspace string                   `yaml:"-"`
+	// unset means true, as in the provider
+	IsCreateBeforeDestroy *bool    `yaml:"-"`
+	VersioningSources     []string `yaml:"-"`
+}
+
+// properties are an assembled configuration's project properties, with their scopes already merged into one map
+func TagConfigurationFromProperties(properties interface{}, account string) (TagConfiguration, error) {
+	config := TagConfiguration{}
+	content, err := yaml.Marshal(properties)
+	if err == nil {
+		err = yaml.Unmarshal(content, &config)
+	}
+	if err != nil {
+		return TagConfiguration{}, errors.Wrap(errors.ErrParse, "failed to read project_properties", err)
+	}
+	config.Account = account
+
+	// terraform takes "false" for a bool as happily as false, so a quoted one must not fail the whole decode
+	if scalars, ok := properties.(map[string]interface{}); ok {
+		if raw, set := scalars["is_create_before_destroy"]; set {
+			isCreateBeforeDestroy := fmt.Sprint(raw) != "false"
+			config.IsCreateBeforeDestroy = &isCreateBeforeDestroy
+		}
+	}
+	return config, nil
+}
+
+func kmsTags(tags map[string]string) []kmstypes.Tag {
+	if len(tags) == 0 {
+		return nil
+	}
+	kmsTags := make([]kmstypes.Tag, 0, len(tags))
+	for _, key := range slices.Sorted(maps.Keys(tags)) {
+		kmsTags = append(kmsTags, kmstypes.Tag{TagKey: aws.String(key), TagValue: aws.String(tags[key])})
+	}
+	return kmsTags
 }
 
 func (c TagConfiguration) Validate() error {
@@ -96,40 +142,68 @@ func (c TagConfiguration) Validate() error {
 	return nil
 }
 
+// a caser keeps state between calls and isn't safe to share, so each call gets its own
+func title(text string) string {
+	return cases.Title(language.English, cases.NoLower).String(text)
+}
+
+func (c TagConfiguration) accountCoding() (account AccountCoding, classCode string, err error) {
+	// NB: the provider removes a leading zero because of https://github.com/hashicorp/terraform/issues/28619
+	account, ok := c.AccountsCoding[strings.TrimPrefix(c.Account, "0")]
+	if !ok {
+		return AccountCoding{}, "", errors.Newf(errors.ErrParam, "account ID '%s' is not in accounts_coding", c.Account)
+	}
+	names := make([]string, 0, len(environmentClasses))
+	for _, class := range environmentClasses {
+		if class.name == account.Class {
+			return account, class.code, nil
+		}
+		names = append(names, class.name)
+	}
+	return AccountCoding{}, "", errors.Newf(errors.ErrParam,
+		"account ID '%s' has class '%s' in accounts_coding. Use one of %s",
+		c.Account, account.Class, strings.Join(names, ", "))
+}
+
+// each environment falls back to the other when only one is set
+func (c TagConfiguration) environments() (infra, app string) {
+	infra, app = c.InfraEnvironment, c.AppEnvironment
+	if infra == "" {
+		infra = app
+	}
+	if app == "" {
+		app = infra
+	}
+	return infra, app
+}
+
+func (c TagConfiguration) canonicalRole() string {
+	canonical := func(role string) string {
+		return title(strings.Trim(strings.TrimPrefix(strings.ReplaceAll(role, " ", ""), nameComponentSeparator), " "))
+	}
+	role := canonical(c.Role)
+	if extend := canonical(c.RoleExtend); extend != "" {
+		role = role + nameComponentSeparator + extend
+	}
+	return role
+}
+
 func Tags(c TagConfiguration, resourceType, name string) (map[string]string, []string, error) {
+	return tagsWithRoom(c, resourceType, name, 0)
+}
+
+// keeps that many of the tags AWS allows free, for the ones a caller adds on top
+func tagsWithRoom(c TagConfiguration, resourceType, name string, room int) (map[string]string, []string, error) {
 	if err := c.Validate(); err != nil {
 		return nil, nil, err
 	}
 
-	// NB: the provider removes a leading zero because of https://github.com/hashicorp/terraform/issues/28619
-	accountID := strings.TrimPrefix(c.Account, "0")
-	account, ok := c.AccountsCoding[accountID]
-	if !ok {
-		return nil, nil, errors.Newf(errors.ErrParam, "account ID '%s' is not in accounts_coding", c.Account)
+	account, _, err := c.accountCoding()
+	if err != nil {
+		return nil, nil, err
 	}
-	if !slices.Contains(environmentClasses, account.Class) {
-		return nil, nil, errors.Newf(errors.ErrParam,
-			"account ID '%s' has class '%s' in accounts_coding. Use one of %s",
-			c.Account, account.Class, strings.Join(environmentClasses, ", "))
-	}
-
-	infraEnvironment := c.InfraEnvironment
-	if infraEnvironment == "" {
-		infraEnvironment = c.AppEnvironment
-	}
-	appEnvironment := c.AppEnvironment
-	if appEnvironment == "" {
-		appEnvironment = c.InfraEnvironment
-	}
-
-	caser := cases.Title(language.English, cases.NoLower)
-	title := caser.String
-
-	canonicalRole := title(strings.Trim(strings.TrimPrefix(strings.ReplaceAll(c.Role, " ", ""), nameComponentSeparator), " "))
-	canonicalRoleExtend := title(strings.Trim(strings.TrimPrefix(strings.ReplaceAll(c.RoleExtend, " ", ""), nameComponentSeparator), " "))
-	if canonicalRoleExtend != "" {
-		canonicalRole = canonicalRole + nameComponentSeparator + canonicalRoleExtend
-	}
+	infraEnvironment, appEnvironment := c.environments()
+	canonicalRole := c.canonicalRole()
 
 	sections := map[string]map[string]string{
 		"business": {
@@ -245,7 +319,7 @@ func Tags(c TagConfiguration, resourceType, name string) (map[string]string, []s
 		return orderedKeys[i] < orderedKeys[j]
 	})
 
-	limit := maxTags
+	limit := maxTags - room
 	if resourceType == ResourceTypeSecret {
 		limit-- // Leaves room for the isCreatedHere tag that Create adds, which destroy needs.
 	}
