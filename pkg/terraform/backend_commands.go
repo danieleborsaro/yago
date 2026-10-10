@@ -142,13 +142,13 @@ func newBackendProvisionCommand(use, short, long string, plan func(stateBucket) 
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.ErrOrStderr(), "yago tf backend %s will\n", use)
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "yago tf backend %s will\n", use)
 			for _, change := range planned.Changes {
 				// a change can run over several lines, its tags do, and they stay under their own bullet
-				fmt.Fprintf(cmd.ErrOrStderr(), "  - %s\n", strings.ReplaceAll(change, "\n", "\n      "))
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "  - %s\n", strings.ReplaceAll(change, "\n", "\n      "))
 			}
 			if isDryRun {
-				fmt.Fprintln(cmd.ErrOrStderr(), "This is a dry run, nothing was changed")
+				_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "This is a dry run, nothing was changed")
 				return nil
 			}
 			if !isAutoApprove {
@@ -190,9 +190,9 @@ The bucket name has to be typed back first. The KMS key is left alone.`,
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.ErrOrStderr(), "yago tf backend delete will\n  - delete the empty state bucket %s, its KMS key is left alone\n", name)
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "yago tf backend delete will\n  - delete the empty state bucket %s, its KMS key is left alone\n", name)
 			if isDryRun {
-				fmt.Fprintln(cmd.ErrOrStderr(), "This is a dry run, nothing was changed")
+				_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "This is a dry run, nothing was changed")
 				return nil
 			}
 			if !isForce {
@@ -290,7 +290,7 @@ func (t *bucketTarget) writePins(out io.Writer, result *aws.StateBucketResult) e
 }
 
 func confirmTyped(input io.Reader, prompt io.Writer, question, want string) error {
-	fmt.Fprint(prompt, question)
+	_, _ = fmt.Fprint(prompt, question)
 	answer, _ := bufio.NewReader(input).ReadString('\n')
 	if strings.TrimSpace(answer) != want {
 		return fmt.Errorf("what was typed is not %q", want)
@@ -321,7 +321,7 @@ func writeBackends(out io.Writer, format string, value interface{}, rows []map[s
 	switch format {
 	case formatTable:
 		table := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(table, "REGION\tBUCKET\tKEY")
+		_, _ = fmt.Fprintln(table, "REGION\tBUCKET\tKEY")
 		for _, row := range rows {
 			// a listed backends file may leave one of these out, and an empty cell reads better than <nil>
 			cells := make([]string, 0, 3)
@@ -329,7 +329,7 @@ func writeBackends(out io.Writer, format string, value interface{}, rows []map[s
 				cell, _ := row[name].(string)
 				cells = append(cells, cell)
 			}
-			fmt.Fprintln(table, strings.Join(cells, "\t"))
+			_, _ = fmt.Fprintln(table, strings.Join(cells, "\t"))
 		}
 		return table.Flush()
 	case formatJSON:
