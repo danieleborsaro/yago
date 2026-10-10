@@ -23,7 +23,7 @@ func fakeTerraform(t *testing.T) (logPath string) {
 	logPath = filepath.Join(bin, "calls.log")
 	script := `#!/bin/sh
 if [ "$1" = "--version" ] || [ "$1" = "version" ]; then
-  echo "Terraform v` + DefaultTerraformVersion + `"
+  echo "Terraform v1.5.1"
   exit 0
 fi
 echo "$*" >> "` + logPath + `"
