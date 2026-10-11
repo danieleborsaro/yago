@@ -85,3 +85,23 @@ brews:
 
     test: |
       assert_path_exists bin/"yago"
+
+  # Versioned formula (yago@X.Y.Z.rb), kept in the tap for every release
+  - name: "yago@{{ .Version }}"
+    directory: "Formula"
+
+    repository:
+      owner: danieleborsaro
+      name: homebrew-devops
+      token: "{{ .Env.TAP_GITHUB_TOKEN }}"
+      branch: main
+
+    homepage: "https://github.com/danieleborsaro/homebrew-devops"
+    description: "GitOps tool for non-kubernetes platforms"
+    license: "Apache-2.0"
+    conflicts:
+      - yago
+    skip_upload: true
+
+    test: |
+      assert_path_exists bin/"yago"
