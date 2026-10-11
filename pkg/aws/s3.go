@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 
 	"github.com/danieleborsaro/yago/internal/utils/errors"
@@ -36,23 +35,9 @@ func NewS3Manager(region, profile string) (*S3Manager, error) {
 
 	logging.Debug("Creating S3 manager for region %s (profile: %s)", region, profile)
 
-	// Load AWS config
-	var cfg aws.Config
-	var err error
-
-	if profile != "" {
-		cfg, err = config.LoadDefaultConfig(ctx,
-			config.WithRegion(region),
-			config.WithSharedConfigProfile(profile),
-		)
-	} else {
-		cfg, err = config.LoadDefaultConfig(ctx,
-			config.WithRegion(region),
-		)
-	}
-
+	cfg, err := loadConfig(ctx, region, profile)
 	if err != nil {
-		return nil, errors.Wrapf(errors.ErrFail, err, "failed to load AWS config")
+		return nil, err
 	}
 
 	client := s3.NewFromConfig(cfg)

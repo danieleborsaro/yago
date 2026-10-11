@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"strings"
 
-	"gopkg.in/yaml.v3"
-
 	"github.com/danieleborsaro/yago/internal/utils/errors"
 	"github.com/danieleborsaro/yago/internal/utils/logging"
 	awssecretsmanager "github.com/danieleborsaro/yago/pkg/aws"
@@ -250,49 +248,12 @@ func (l *Lib) tagConfiguration() (awssecretsmanager.TagConfiguration, error) {
 		return awssecretsmanager.TagConfiguration{}, err
 	}
 
-	content, err := yaml.Marshal(l.configuration["project_properties"])
+	config, err := awssecretsmanager.TagConfigurationFromProperties(l.configuration["project_properties"], accountId)
 	if err != nil {
-		return awssecretsmanager.TagConfiguration{}, errors.Wrap(errors.ErrParse, "failed to read project_properties", err)
+		return awssecretsmanager.TagConfiguration{}, err
 	}
-
-	var properties struct {
-		CompanyNameShort   string                                     `yaml:"company_name_short"`
-		AccountsCoding     map[string]awssecretsmanager.AccountCoding `yaml:"accounts_coding"`
-		AppEcosystem       string                                     `yaml:"app_ecosystem"`
-		AppEnvironment     string                                     `yaml:"app_environment"`
-		InfraEnvironment   string                                     `yaml:"infra_environment"`
-		ProjectNameLong    string                                     `yaml:"project_name_long"`
-		ResourceSetLong    string                                     `yaml:"resource_set_long"`
-		Role               string                                     `yaml:"role"`
-		Owner              string                                     `yaml:"owner"`
-		CostCentre         string                                     `yaml:"cost_centre"`
-		Compliance         string                                     `yaml:"compliance"`
-		Description        string                                     `yaml:"description"`
-		CustomTags         map[string]string                          `yaml:"custom_tags"`
-		CustomTagsVerbatim map[string]string                          `yaml:"custom_tags_verbatim"`
-	}
-	if err := yaml.Unmarshal(content, &properties); err != nil {
-		return awssecretsmanager.TagConfiguration{}, errors.Wrap(errors.ErrParse, "failed to read project_properties", err)
-	}
-
-	l.tagConfig = &awssecretsmanager.TagConfiguration{
-		Account:            accountId,
-		AccountsCoding:     properties.AccountsCoding,
-		CompanyNameShort:   properties.CompanyNameShort,
-		AppEcosystem:       properties.AppEcosystem,
-		AppEnvironment:     properties.AppEnvironment,
-		InfraEnvironment:   properties.InfraEnvironment,
-		ProjectNameLong:    properties.ProjectNameLong,
-		ResourceSetLong:    properties.ResourceSetLong,
-		Role:               properties.Role,
-		Owner:              properties.Owner,
-		CostCentre:         properties.CostCentre,
-		Compliance:         properties.Compliance,
-		Description:        properties.Description,
-		CustomTags:         properties.CustomTags,
-		CustomTagsVerbatim: properties.CustomTagsVerbatim,
-	}
-	return *l.tagConfig, nil
+	l.tagConfig = &config
+	return config, nil
 }
 
 func describeCreatedSecret(result *awssecretsmanager.SecretCreationResult) string {

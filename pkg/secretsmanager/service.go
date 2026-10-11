@@ -1,11 +1,7 @@
 package secretsmanager
 
 import (
-	"fmt"
-
-	"github.com/danieleborsaro/yago/internal/parser"
 	"github.com/danieleborsaro/yago/internal/utils/errors"
-	"github.com/danieleborsaro/yago/internal/utils/logging"
 	"github.com/danieleborsaro/yago/pkg/wrapper"
 )
 
@@ -64,7 +60,7 @@ func (s *Service) PostConfigurationAssemble(req wrapper.AssembleRequest, respons
 		content["secrets"] = map[string]interface{}{}
 	}
 
-	projectProperties, err := mergeProjectProperties(content)
+	projectProperties, err := wrapper.MergeProperties(content, true, projectPropertiesParts...)
 	if err != nil {
 		return err
 	}
@@ -80,30 +76,4 @@ func (s *Service) PostAssemble(req wrapper.AssembleRequest, response *wrapper.As
 
 func (s *Service) PostCache(req wrapper.AssembleRequest, response *wrapper.AssembleResponse, ctx *wrapper.CacheContext) error {
 	return nil
-}
-
-func mergeProjectProperties(content map[string]interface{}) (map[string]interface{}, error) {
-	engine := parser.NewStrategicMergeEngine(nil)
-	merged := map[string]interface{}{}
-
-	for _, name := range projectPropertiesParts {
-		value, exists := content[name]
-		if !exists || value == nil {
-			logging.Debug("The configuration has no %s", name)
-			continue
-		}
-
-		properties, ok := value.(map[string]interface{})
-		if !ok {
-			return nil, errors.NewConfigurationMalformedError(fmt.Sprintf("%s is not a map", name))
-		}
-
-		var err error
-		merged, err = engine.Merge(merged, properties)
-		if err != nil {
-			return nil, errors.Wrapf(errors.ErrParse, err, "failed to merge %s into project_properties", name)
-		}
-	}
-
-	return merged, nil
 }

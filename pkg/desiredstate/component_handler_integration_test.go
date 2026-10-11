@@ -166,7 +166,7 @@ func TestConcurrentHandlerAccess(t *testing.T) {
 // TestHandlerRegistryLookupPerformance benchmarks handler lookup performance.
 func TestHandlerRegistryLookupPerformance(t *testing.T) {
 	if raceEnabled {
-		t.Skip("The race detector slows lookups too much to check the 1µs limit")
+		t.Skip("The race detector slows lookups too much to check the lookup limit")
 	}
 
 	const numLookups = 10000
@@ -196,9 +196,9 @@ func TestHandlerRegistryLookupPerformance(t *testing.T) {
 	t.Logf("Performed %d handler lookups in %v", numLookups*3, duration)
 	t.Logf("Average time per lookup: %v", avgPerLookup)
 
-	// Verify reasonable performance (should be very fast - under 1µs per lookup)
-	if avgPerLookup > time.Microsecond {
-		t.Errorf("Handler lookup too slow: %v per lookup (expected < 1µs)", avgPerLookup)
+	// a lookup takes well under 1µs, the limit is ten times that as a shared CI runner has measured 1.048µs on a quiet change
+	if avgPerLookup > 10*time.Microsecond {
+		t.Errorf("Handler lookup too slow: %v per lookup (expected < 10µs)", avgPerLookup)
 	}
 }
 

@@ -12,7 +12,6 @@ import (
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
 	kmstypes "github.com/aws/aws-sdk-go-v2/service/kms/types"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
@@ -150,28 +149,13 @@ func NewSecretManager(awsProfile, awsRegion string, isDryRun bool) (*SecretManag
 	logging.Debug("Creating SecretManager for region %s (profile: %s, dryRun: %v)",
 		awsRegion, awsProfile, isDryRun)
 
-	// Handle default profile
-	if awsProfile == "" {
-		awsProfile = "default"
+	// "default" has always meant no explicit profile here
+	if awsProfile == "default" {
+		awsProfile = ""
 	}
-
-	// Load AWS config
-	var cfg aws.Config
-	var err error
-
-	if awsProfile != "default" {
-		cfg, err = config.LoadDefaultConfig(ctx,
-			config.WithRegion(awsRegion),
-			config.WithSharedConfigProfile(awsProfile),
-		)
-	} else {
-		cfg, err = config.LoadDefaultConfig(ctx,
-			config.WithRegion(awsRegion),
-		)
-	}
-
+	cfg, err := loadConfig(ctx, awsRegion, awsProfile)
 	if err != nil {
-		return nil, errors.Wrapf(errors.ErrFail, err, "failed to load AWS config")
+		return nil, err
 	}
 
 	return &SecretManager{
@@ -189,11 +173,11 @@ func (sm *SecretManager) AccountID() (string, error) {
 		return sm.accountId, nil
 	}
 
-	stsOutput, err := sm.stsClient.GetCallerIdentity(sm.ctx, &sts.GetCallerIdentityInput{})
+	accountId, err := callerAccount(sm.ctx, sm.stsClient)
 	if err != nil {
-		return "", errors.Wrapf(errors.ErrFail, err, "failed to get AWS account ID")
+		return "", err
 	}
-	sm.accountId = aws.ToString(stsOutput.Account)
+	sm.accountId = accountId
 
 	return sm.accountId, nil
 }
@@ -772,24 +756,7 @@ func (sm *SecretManager) createKmsKeyForSecret(
 		Origin:      kmstypes.OriginTypeAwsKms,
 		MultiRegion: aws.Bool(false),
 		Policy:      aws.String(policy),
-	}
-
-	// Add tags if provided
-	if len(tags) > 0 {
-		keys := make([]string, 0, len(tags))
-		for k := range tags {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-
-		kmsTags := make([]kmstypes.Tag, 0, len(keys))
-		for _, k := range keys {
-			kmsTags = append(kmsTags, kmstypes.Tag{
-				TagKey:   aws.String(k),
-				TagValue: aws.String(tags[k]),
-			})
-		}
-		createKeyInput.Tags = kmsTags
+		Tags:        kmsTags(tags),
 	}
 
 	createKeyOutput, err := sm.kmsClient.CreateKey(sm.ctx, createKeyInput)
@@ -1121,7 +1088,7 @@ func (sm *SecretManager) deleteKmsKey(keyId string) error {
 
 	_, err := sm.kmsClient.ScheduleKeyDeletion(sm.ctx, &kms.ScheduleKeyDeletionInput{
 		KeyId:               aws.String(keyId),
-		PendingWindowInDays: aws.Int32(7), // Minimum waiting period
+		PendingWindowInDays: aws.Int32(kmsKeyDeletionDays),
 	})
 
 	if err != nil {
