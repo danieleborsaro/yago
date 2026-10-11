@@ -28,6 +28,8 @@ type fakeAWS struct {
 	aliases map[string]string
 
 	createAliasErr       error
+	enableRotationErr    error
+	scheduleDeletionErr  error
 	putResourcePolicyErr error
 	removeReplicasErr    error
 	calls                []string
@@ -49,6 +51,9 @@ type fakeKey struct {
 	tags            map[string]string
 	rotation        bool
 	pendingDeletion bool
+	// both empty for a customer key of the fake's own account
+	manager kmstypes.KeyManagerType
+	account string
 }
 
 func newFakeAWS() *fakeAWS {
@@ -319,15 +324,27 @@ func (f *fakeAWS) DescribeKey(ctx context.Context, params *kms.DescribeKeyInput,
 	if !exists {
 		return nil, &kmstypes.NotFoundException{Message: aws.String("not found")}
 	}
-	state := kmstypes.KeyStateEnabled
-	if key.pendingDeletion {
-		state = kmstypes.KeyStatePendingDeletion
+	metadata := &kmstypes.KeyMetadata{
+		KeyId: aws.String(keyId), Arn: aws.String(key.arn),
+		KeyState: kmstypes.KeyStateEnabled, KeyManager: kmstypes.KeyManagerTypeCustomer, AWSAccountId: aws.String(f.accountId),
 	}
-	return &kms.DescribeKeyOutput{KeyMetadata: &kmstypes.KeyMetadata{KeyId: aws.String(keyId), Arn: aws.String(key.arn), KeyState: state}}, nil
+	if key.pendingDeletion {
+		metadata.KeyState = kmstypes.KeyStatePendingDeletion
+	}
+	if key.manager != "" {
+		metadata.KeyManager = key.manager
+	}
+	if key.account != "" {
+		metadata.AWSAccountId = aws.String(key.account)
+	}
+	return &kms.DescribeKeyOutput{KeyMetadata: metadata}, nil
 }
 
 func (f *fakeAWS) EnableKeyRotation(ctx context.Context, params *kms.EnableKeyRotationInput, optFns ...func(*kms.Options)) (*kms.EnableKeyRotationOutput, error) {
 	f.record("EnableKeyRotation")
+	if f.enableRotationErr != nil {
+		return nil, f.enableRotationErr
+	}
 	f.keys[f.resolveKey(aws.ToString(params.KeyId))].rotation = true
 	return &kms.EnableKeyRotationOutput{}, nil
 }
@@ -347,6 +364,9 @@ func (f *fakeAWS) ListResourceTags(ctx context.Context, params *kms.ListResource
 
 func (f *fakeAWS) ScheduleKeyDeletion(ctx context.Context, params *kms.ScheduleKeyDeletionInput, optFns ...func(*kms.Options)) (*kms.ScheduleKeyDeletionOutput, error) {
 	f.record("ScheduleKeyDeletion")
+	if f.scheduleDeletionErr != nil {
+		return nil, f.scheduleDeletionErr
+	}
 	key, exists := f.keys[f.resolveKey(aws.ToString(params.KeyId))]
 	if !exists {
 		return nil, &kmstypes.NotFoundException{Message: aws.String("not found")}

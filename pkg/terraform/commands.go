@@ -37,6 +37,7 @@ func NewTerraformCommand() *cobra.Command {
 	cmd.AddCommand(newUnlockCommand())
 	cmd.AddCommand(newImportCommand())
 	cmd.AddCommand(newCostsCommand())
+	cmd.AddCommand(newBackendCommand())
 
 	return cmd
 }
@@ -54,6 +55,19 @@ type commonFlags struct {
 
 	// not a flag, read from the desiredstate once it's loaded
 	terraformVersion string
+}
+
+func (flags *commonFlags) assembleRequest() TerraformAssembleRequest {
+	return TerraformAssembleRequest{
+		DesiredStateFile:  flags.desiredstateRoot,
+		ConfigFile:        flags.configurationRoot,
+		ConfigRepoWorkdir: flags.configRepoWorkdir,
+		Environment:       flags.environment,
+		AWSProfile:        flags.awsProfile,
+		AWSRegion:         flags.awsRegion,
+		TerraformSource:   flags.terraformSource,
+		OutputFormat:      "json",
+	}
 }
 
 // addCommonFlags adds common flags to a command
@@ -405,16 +419,7 @@ func runAssemble(flags *commonFlags) error {
 	logging.Spaces()
 
 	service := NewService(".", false)
-	assembleResp, err := service.AssembleTerraform(TerraformAssembleRequest{
-		DesiredStateFile:  flags.desiredstateRoot,
-		ConfigFile:        flags.configurationRoot,
-		ConfigRepoWorkdir: flags.configRepoWorkdir,
-		Environment:       flags.environment,
-		AWSProfile:        flags.awsProfile,
-		AWSRegion:         flags.awsRegion,
-		TerraformSource:   flags.terraformSource,
-		OutputFormat:      "json",
-	})
+	assembleResp, err := service.AssembleTerraform(flags.assembleRequest())
 	if err != nil {
 		return fmt.Errorf("failed to assemble terraform configuration: %w", err)
 	}
@@ -469,16 +474,7 @@ func prepareTerraformAssembledInputs(flags *commonFlags) (*TerraformAssembleResp
 		return nil, err
 	}
 	service := NewService(".", false)
-	resp, err := service.AssembleTerraform(TerraformAssembleRequest{
-		DesiredStateFile:  flags.desiredstateRoot,
-		ConfigFile:        flags.configurationRoot,
-		ConfigRepoWorkdir: flags.configRepoWorkdir,
-		Environment:       flags.environment,
-		AWSProfile:        flags.awsProfile,
-		AWSRegion:         flags.awsRegion,
-		TerraformSource:   flags.terraformSource,
-		OutputFormat:      "json",
-	})
+	resp, err := service.AssembleTerraform(flags.assembleRequest())
 	if err != nil {
 		return nil, err
 	}

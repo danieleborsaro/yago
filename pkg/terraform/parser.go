@@ -2,8 +2,11 @@ package terraform
 
 import (
 	"fmt"
+	"maps"
 	"path/filepath"
+	"slices"
 
+	"github.com/danieleborsaro/yago/internal/core"
 	yamlparser "github.com/danieleborsaro/yago/internal/parser"
 	gitrepo "github.com/danieleborsaro/yago/internal/repo"
 	"github.com/danieleborsaro/yago/internal/utils/errors"
@@ -178,34 +181,64 @@ func (p *Parser) loadBackendForRegion(awsRegion string) error {
 		return nil
 	}
 
-	cfgDoc := cfg.GetDocument()
-	if cfgDoc == nil {
-		return nil
-	}
-
-	cfgMeta := cfgDoc.GetMeta()
-	if cfgMeta == nil || cfgMeta.Data == nil {
-		return nil
-	}
-
-	backendPath, err := p.extractBackendPath(cfgMeta.Data, cfgDoc.GetSchemaVersion(), awsRegion)
+	absBackendPath, err := listedBackendFile(cfg.GetDocument(), awsRegion)
 	if err != nil {
 		return err
 	}
-	if backendPath == "" {
+	if absBackendPath == "" {
 		logging.Debug("No backends file listed for region: %s", awsRegion)
 		return nil
 	}
-
-	configWorkdir := cfgDoc.GetWorkdir()
-	absBackendPath := filepath.Join(configWorkdir, backendPath)
-	logging.Debug("Resolved absolute backend path: %s (workdir: %s)", absBackendPath, configWorkdir)
+	logging.Debug("Resolved absolute backend path: %s", absBackendPath)
 
 	if err := p.LoadBackendConfig(absBackendPath, awsRegion); err != nil {
 		return errors.Wrapf(errors.ErrParse, err, "failed to load backend configuration for region %s", awsRegion)
 	}
 
 	return nil
+}
+
+// the backends files a configuration lists, by region and as they are written there, and where in its meta they sit,
+// the wrappers path comes from the schema's x-gitops-paths so it isn't hardcoded here
+func listedBackends(document *core.GitOpsDocument) (entries map[string]interface{}, locator string) {
+	if document == nil || document.GetMeta() == nil || document.GetMeta().Data == nil {
+		return nil, ""
+	}
+	meta := document.GetMeta().Data
+	wrappersPath, err := wrapper.DiscoverPropertyPath(meta, document.GetSchemaVersion(), false, "wrappers")
+	if err != nil {
+		logging.Warn("unable to resolve 'wrappers' path from x-gitops-paths: %v", err)
+		return nil, ""
+	}
+	locator = wrappersPath + ".terraform.backends"
+	value, err := yamlparser.NewYAMLHandler("/").GetValue(meta, locator)
+	if err != nil {
+		logging.Debug("no backends files listed at '%s': %v", locator, err)
+		return nil, locator
+	}
+	entries, _ = toStringMap(value)
+	return entries, locator
+}
+
+// where the backends file a configuration lists for the region is, empty when it lists none
+func listedBackendFile(document *core.GitOpsDocument, awsRegion string) (string, error) {
+	entries, locator := listedBackends(document)
+	value, listed := entries[awsRegion]
+	if !listed {
+		return "", nil
+	}
+
+	// if an entry is listed the state hasn't moved over yet, so a broken one stops here rather than getting a generated key
+	backendPath, ok := value.(string)
+	if !ok || backendPath == "" {
+		return "", errors.Newf(errors.ErrConfigurationMalformed, "'%s.%s' must be the path of a backends file", locator, awsRegion)
+	}
+	return filepath.Join(document.GetWorkdir(), backendPath), nil
+}
+
+func listedBackendRegions(document *core.GitOpsDocument) []string {
+	entries, _ := listedBackends(document)
+	return slices.Sorted(maps.Keys(entries))
 }
 
 func (p *Parser) loadTerraformSourceCode(terraformSourceCodeDir string) error {
@@ -305,33 +338,6 @@ func (p *Parser) loadTerraformVersion() error {
 	logging.Debug("Loaded terraform version from desiredstate via x-gitops-paths (%s): %s", terraformVersionPath, version)
 	return nil
 
-}
-
-// extractBackendPath extracts the backend file path from configuration metadata.
-// Uses schema-defined x-gitops-paths.configuration.wrappers to avoid hardcoded paths.
-func (p *Parser) extractBackendPath(configMeta map[string]interface{}, schemaVersion string, awsRegion string) (string, error) {
-	wrappersPath, err := wrapper.DiscoverPropertyPath(configMeta, schemaVersion, false, "wrappers")
-	if err != nil {
-		logging.Warn("extractBackendPath: unable to resolve 'wrappers' path from x-gitops-paths: %v", err)
-		return "", nil
-	}
-
-	backendLocator := wrappersPath + ".terraform.backends." + awsRegion
-	handler := yamlparser.NewYAMLHandler("/")
-
-	backendValue, err := handler.GetValue(configMeta, backendLocator)
-	if err != nil {
-		logging.Debug("extractBackendPath: backend path not found at '%s': %v", backendLocator, err)
-		return "", nil
-	}
-
-	// if an entry is listed the state hasn't moved over yet, so a broken one stops here rather than getting a generated key
-	backendPath, ok := backendValue.(string)
-	if !ok || backendPath == "" {
-		return "", errors.Newf(errors.ErrConfigurationMalformed, "'%s' must be the path of a backends file", backendLocator)
-	}
-
-	return backendPath, nil
 }
 
 // LoadBackendConfig loads backend configuration for the specified region.

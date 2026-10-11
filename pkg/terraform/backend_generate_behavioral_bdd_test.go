@@ -223,7 +223,7 @@ func TestTerraformBackend_ListedBackendsFileWins_BehavioralBDD(t *testing.T) {
 func TestTerraformBackend_BrokenBackendsEntryStops_BehavioralBDD(t *testing.T) {
 	contract := BehavioralContract{
 		Behavior:        "Stop when a backends entry is listed for the region but isn't a file path",
-		CurrentImpl:     "Parser.extractBackendPath returns an error for a listed entry that is empty or not a string",
+		CurrentImpl:     "listedBackendFile returns an error for a listed entry that is empty or not a string",
 		ExpectedOutcome: "Assemble fails and names the entry, and no backend is generated from terraform_backend",
 		Rationale:       "A listed entry means the state hasn't migrated, so a typo there must not move it to a generated key",
 	}

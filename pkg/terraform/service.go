@@ -211,7 +211,7 @@ func (s *Service) PostCache(req wrapper.AssembleRequest, response *wrapper.Assem
 
 	generateJSON := req.OutputFormat == "json"
 	if err := s.applyBackendDeclaration(req.Environment, response.ConfigurationFile, generateJSON); err != nil {
-		return errors.Wrap(errors.ErrConfigurationMalformed, "failed to generate terraform backend configuration", err)
+		return malformedBackend(err)
 	}
 	if err := s.assembleParser.CacheBackendConfig(req.CacheDirectory, generateJSON); err != nil {
 		return errors.Wrapf(errors.ErrFail, err, "failed to cache terraform backend configuration")
@@ -229,23 +229,33 @@ func (s *Service) PostCache(req wrapper.AssembleRequest, response *wrapper.Assem
 	return nil
 }
 
-// a listed backends file always wins, this way a shared terraform_backend can't move a state we already have
 func (s *Service) applyBackendDeclaration(environment, configPath string, generateJSON bool) error {
 	declaration, err := takeBackendDeclaration(configPath, generateJSON)
-	if err != nil || declaration == nil {
+	if err != nil {
 		return err
 	}
-	if s.assembleParser.GetBackendConfig() != nil {
-		logging.Debug("Backends file listed for region %s, ignoring %s", s.awsRegion, backendDeclarationKey)
-		return nil
-	}
-	backend, err := generateBackend(declaration, s.awsRegion, environment)
-	if err != nil || backend == nil {
+	listed := s.assembleParser.GetBackendConfig()
+	backend, err := resolveBackend(listed, declaration, s.awsRegion, environment)
+	if err != nil || backend == nil || listed != nil {
 		return err
 	}
 	logging.Info("Generated backend for region %s with state key %s", s.awsRegion, backend["key"])
 	s.assembleParser.UseGeneratedBackend(backend)
 	return nil
+}
+
+// a listed backends file always wins, this way a shared terraform_backend can't move a state we already have,
+// and nothing back means the region has no backend at all
+func resolveBackend(listed *BackendConfig, declaration map[string]interface{}, region, environment string) (map[string]interface{}, error) {
+	if listed != nil {
+		logging.Debug("Backends file listed for region %s, not reading %s for it", region, backendDeclarationKey)
+		return listed.raw, nil
+	}
+	return generateBackend(declaration, region, environment)
+}
+
+func malformedBackend(err error) error {
+	return errors.Wrap(errors.ErrConfigurationMalformed, "failed to generate terraform backend configuration", err)
 }
 
 // Terraform warns about every undeclared variable in a -var-file, so keep only the desiredstate key.

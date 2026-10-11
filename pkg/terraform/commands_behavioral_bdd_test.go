@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/danieleborsaro/yago/internal/schema"
+	"github.com/spf13/cobra"
 )
 
 // stub terraform on PATH, it answers version checks and logs every other call so
@@ -581,7 +582,16 @@ func TestTerraformCommands_EnvironmentHasNoDefault_BehavioralBDD(t *testing.T) {
 	// Given: the tf command tree
 	tf := NewTerraformCommand()
 
+	var subs []*cobra.Command
 	for _, sub := range tf.Commands() {
+		if sub.HasSubCommands() {
+			subs = append(subs, sub.Commands()...)
+			continue
+		}
+		subs = append(subs, sub)
+	}
+
+	for _, sub := range subs {
 		t.Run(sub.Name(), func(t *testing.T) {
 			// When: reading the subcommand's -e flag
 			flag := sub.Flags().Lookup("environment")
