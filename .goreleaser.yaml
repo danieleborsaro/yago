@@ -79,5 +79,9 @@ brews:
     description: "GitOps tool for non-kubernetes platforms"
     license: "Apache-2.0"
 
+    # The formula is pushed by the release workflow after removing the
+    # redundant `version` line (see .github/workflows/release.yml)
+    skip_upload: true
+
     test: |
       assert_path_exists bin/"yago"
