@@ -261,7 +261,7 @@ Quick reference for performance thresholds:
 ### GitHub Actions Workflows
 
 ```yaml
-# .github/workflows/behavioral-bdd-tests.yml
+# .github/workflows/bdd-pr.yml
 # Runs on: push to main, develop; pull requests
 # Jobs:
 #   - behavioral-tests (the Go version in go.mod)

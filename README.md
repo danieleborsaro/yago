@@ -1,6 +1,6 @@
 # YAGO (Yet Another GitOps)
 
-[![Behavioral BDD Tests](https://github.com/danieleborsaro/yago/actions/workflows/behavioral-bdd-tests.yml/badge.svg)](https://github.com/danieleborsaro/yago/actions/workflows/behavioral-bdd-tests.yml)
+[![Nightly BDD Tests](https://github.com/danieleborsaro/yago/actions/workflows/bdd-nightly.yml/badge.svg)](https://github.com/danieleborsaro/yago/actions/workflows/bdd-nightly.yml)
 [![Coverage](https://github.com/danieleborsaro/yago/actions/workflows/coverage.yml/badge.svg)](https://github.com/danieleborsaro/yago/actions/workflows/coverage.yml)
 [![PR Quality Check](https://github.com/danieleborsaro/yago/actions/workflows/pr-check.yml/badge.svg)](https://github.com/danieleborsaro/yago/actions/workflows/pr-check.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/danieleborsaro/yago)](https://goreportcard.com/report/github.com/danieleborsaro/yago)
@@ -467,7 +467,7 @@ yago/
 ├── tests/                  # Integration test assets
 ├── docs/                   # Documentation
 ├── .github/workflows/      # CI/CD pipelines
-│   ├── behavioral-bdd-tests.yml  # Comprehensive test suite
+│   ├── bdd-pr.yml / bdd-nightly.yml  # BDD tests (PR: affected, nightly: full)
 │   └── pr-check.yml        # Quick PR validation
 ├── .golangci.yml          # Go linting configuration
 ├── .yamllint.yaml         # YAML linting configuration
