@@ -1,15 +1,17 @@
 ---
-name: Coverage Tracking
+name: Nightly Tests and Coverage
 
+# Nightly full test suite (unit + BDD, with the race detector) and coverage
+# tracking against main. PRs only run the tests affected by their changes.
 on:
-  push:
-    branches: [main, develop, feature/*]
-  pull_request:
-    branches: [main, develop]
   workflow_dispatch:
   schedule:
     # Run daily at 2 AM UTC to track coverage trends
     - cron: '0 2 * * *'
+
+concurrency:
+  group: coverage
+  cancel-in-progress: false
 
 env:
   COVERAGE_THRESHOLD: 30
@@ -20,13 +22,17 @@ jobs:
   # ===========================================================================
 
   full-coverage:
-    name: Full Coverage Analysis
+    name: Full Tests and Coverage
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # permissions:
+    #   issues: write   # required by the failure-reporting step below
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
+          ref: main
           fetch-depth: 0 # Full history for trend analysis
 
       - name: Set up Go
@@ -186,63 +192,29 @@ jobs:
           echo "❌ Coverage ${{ steps.coverage.outputs.total }}% is below threshold $COVERAGE_THRESHOLD%"
           exit 1
 
-  # ===========================================================================
-  # PACKAGE-SPECIFIC COVERAGE
-  # ===========================================================================
-
-  package-coverage:
-    name: Package Coverage Matrix
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - package: pkg/desiredstate
-            artifact: pkg-desiredstate
-          - package: pkg/wrapper
-            artifact: pkg-wrapper
-          - package: internal/core
-            artifact: internal-core
-          - package: internal/parser
-            artifact: internal-parser
-          - package: internal/cli
-            artifact: internal-cli
-          - package: cmd/yago
-            artifact: cmd-yago
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Run package tests with coverage
-        continue-on-error: true
-        run: |
-          PACKAGE="${{ matrix.package }}"
-          SAFE_NAME=$(echo $PACKAGE | tr '/' '-')
-
-          # Run tests for this package
-          go test -v -coverprofile=${SAFE_NAME}-coverage.out -covermode=atomic ./${PACKAGE}/...
-
-          # Calculate coverage
-          if [ -f "${SAFE_NAME}-coverage.out" ]; then
-            COVERAGE=$(go tool cover -func=${SAFE_NAME}-coverage.out | grep total: | awk '{print $3}')
-            echo "Package $PACKAGE coverage: $COVERAGE"
-
-            # Save for summary
-            echo "$PACKAGE,$COVERAGE" >> package-results.csv
-          fi
-
-      - name: Upload package coverage
-        uses: actions/upload-artifact@v4
-        with:
-          name: package-coverage-${{ matrix.artifact }}
-          path: "*-coverage.out"
-          retention-days: 30
+        # Uncomment to open (or update) an issue when the nightly run fails.
+        # - name: Report failure
+        #   if: failure()
+        #   uses: actions/github-script@v7
+        #   with:
+        #     script: |
+        #       const title = 'Nightly test suite failing';
+        #       const body = `Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+        #       const { data: issues } = await github.rest.issues.listForRepo({
+        #         owner: context.repo.owner, repo: context.repo.repo,
+        #         state: 'open', labels: 'nightly-failure',
+        #       });
+        #       if (issues.length) {
+        #         await github.rest.issues.createComment({
+        #           owner: context.repo.owner, repo: context.repo.repo,
+        #           issue_number: issues[0].number, body,
+        #         });
+        #       } else {
+        #         await github.rest.issues.create({
+        #           owner: context.repo.owner, repo: context.repo.repo,
+        #           title, body, labels: ['nightly-failure'],
+        #         });
+        #       }
 
   # ===========================================================================
   # COVERAGE TREND TRACKING
@@ -254,9 +226,7 @@ jobs:
     permissions:
       contents: write
     needs: full-coverage
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
-    env:
-      COVERAGE_BRANCH: "coverage-history"
+    if: github.ref == 'refs/heads/main'
 
     steps:
       - name: Checkout code
@@ -275,14 +245,12 @@ jobs:
           COMMIT=$(git rev-parse --short HEAD)
           COVERAGE=$(go tool cover -func=coverage.out | grep total: | awk '{print $3}' | sed 's/%//')
 
-          git fetch --all
-          if git show-ref --verify --quiet "refs/remotes/origin/$COVERAGE_BRANCH"; then
-            git checkout -B "$COVERAGE_BRANCH" "origin/$COVERAGE_BRANCH"
-          else
-            git checkout -B "$COVERAGE_BRANCH"
-          fi
-
           mkdir -p .coverage-history
+          # One-off migration of the history previously kept on the coverage-history branch
+          if [ ! -f .coverage-history/coverage.csv ] && \
+             git ls-tree -r --name-only origin/coverage-history 2>/dev/null | grep -qx '.coverage-history/coverage.csv'; then
+            git show origin/coverage-history:.coverage-history/coverage.csv > .coverage-history/coverage.csv
+          fi
           echo "$DATE,$COMMIT,$COVERAGE" >> .coverage-history/coverage.csv
 
       - name: Generate coverage trend chart
@@ -299,7 +267,6 @@ jobs:
           fi
 
       - name: Commit coverage history
-        if: github.event_name != 'pull_request'
         env:
           GPG_PRIVATE_KEY: ${{ secrets.PUSH_GPG_PRIVATE_KEY }}
           GPG_KEY_ID: ${{ secrets.PUSH_GPG_KEY_ID }}
@@ -319,7 +286,8 @@ jobs:
           fi
 
           git commit -m "Update coverage history [skip ci]"
-          git push origin "$COVERAGE_BRANCH"
+          git pull --rebase origin main
+          git push origin HEAD:main
 
   # ===========================================================================
   # COVERAGE BADGE GENERATION
@@ -377,23 +345,3 @@ jobs:
           label: behavioral tests
           message: 68 contracts
           color: brightgreen
-
-  # ===========================================================================
-  # QUALITY GATE
-  # ===========================================================================
-
-  coverage-gate:
-    name: Coverage Quality Gate
-    runs-on: ubuntu-latest
-    needs: [full-coverage]
-
-    steps:
-      - name: Quality gate check
-        run: |
-          echo "## ✅ Coverage Quality Gate" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "All coverage thresholds met!" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ Full coverage analyzed" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ Behavioral BDD tests are tracked by behavioral-bdd-tests.yml" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ Package-level coverage monitored" >> $GITHUB_STEP_SUMMARY

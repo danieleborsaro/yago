@@ -1,0 +1,134 @@
+---
+name: BDD Tests (PR)
+
+# Runs only the behavioral tests of the packages affected by the PR.
+# The full suite runs nightly (see coverage.yml).
+on:
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+
+concurrency:
+  group: bdd-pr-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  select:
+    name: Select affected packages
+    runs-on: ubuntu-latest
+    outputs:
+      packages: ${{ steps.select.outputs.packages }}
+      run: ${{ steps.select.outputs.run }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Compute affected packages
+        id: select
+        run: |
+          base="origin/${{ github.base_ref || 'main' }}"
+          result="$(tests/scripts/affected-packages.sh "$base")"
+          if [ "$result" = "ALL" ]; then
+            packages="./..."
+          else
+            packages="$(echo "$result" | xargs)"
+          fi
+          if [ -z "$packages" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "packages=$packages" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Affected packages"
+            echo
+            if [ -z "$packages" ]; then echo "_None: no Go-relevant changes._"; else echo '```'; echo "$packages" | tr ' ' '\n'; echo '```'; fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  behavioral-tests:
+    name: Run affected BDD tests
+    needs: select
+    if: needs.select.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Run behavioral BDD tests
+        run: |
+          go test -race -run "BehavioralBDD" ${{ needs.select.outputs.packages }}
+
+  performance-check:
+    name: Performance thresholds
+    needs: select
+    if: needs.select.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run performance tests
+        run: go test -v ./cmd/yago -run "TestCLI_PerformanceRequirements_BehavioralBDD"
+
+  contract-validation:
+    name: Validate behavioral contracts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Validate contract structure
+        run: |
+          total_files=$(find . -name "*behavioral*test.go" | wc -l)
+          total_contracts=$(find . -name "*behavioral*test.go" -exec grep -h "^func Test.*BehavioralBDD" {} \; | wc -l)
+          missing_behavior=0
+          missing_rationale=0
+          for file in $(find . -name "*behavioral*test.go"); do
+            grep -q "Behavior:" "$file" || missing_behavior=$((missing_behavior + 1))
+            grep -q "Rationale:" "$file" || missing_rationale=$((missing_rationale + 1))
+          done
+          {
+            echo "## Behavioral Contract Validation"
+            echo "- Contracts: $total_contracts in $total_files files"
+            echo "- Files missing Behavior: $missing_behavior"
+            echo "- Files missing Rationale: $missing_rationale"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Single required check for branch protection: passes when the selected
+  # tests passed or when nothing needed to run.
+  bdd-gate:
+    name: BDD gate
+    if: always()
+    needs: [select, behavioral-tests, performance-check, contract-validation]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Evaluate results
+        run: |
+          results='${{ join(needs.*.result, ' ') }}'
+          echo "Results: $results"
+          case "$results" in
+            *failure*|*cancelled*) echo "BDD gate failed"; exit 1 ;;
+          esac
