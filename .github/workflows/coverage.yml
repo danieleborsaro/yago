@@ -1,15 +1,16 @@
 ---
 name: Coverage Tracking
 
+# Coverage is tracked nightly against main only; it does not run on PRs.
 on:
-  push:
-    branches: [main, develop, feature/*]
-  pull_request:
-    branches: [main, develop]
   workflow_dispatch:
   schedule:
-    # Run daily at 2 AM UTC to track coverage trends
-    - cron: '0 2 * * *'
+    # Run daily at 3 AM UTC to track coverage trends
+    - cron: '0 3 * * *'
+
+concurrency:
+  group: coverage
+  cancel-in-progress: false
 
 env:
   COVERAGE_THRESHOLD: 30
@@ -254,9 +255,7 @@ jobs:
     permissions:
       contents: write
     needs: full-coverage
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
-    env:
-      COVERAGE_BRANCH: "coverage-history"
+    if: github.ref == 'refs/heads/main'
 
     steps:
       - name: Checkout code
@@ -275,14 +274,12 @@ jobs:
           COMMIT=$(git rev-parse --short HEAD)
           COVERAGE=$(go tool cover -func=coverage.out | grep total: | awk '{print $3}' | sed 's/%//')
 
-          git fetch --all
-          if git show-ref --verify --quiet "refs/remotes/origin/$COVERAGE_BRANCH"; then
-            git checkout -B "$COVERAGE_BRANCH" "origin/$COVERAGE_BRANCH"
-          else
-            git checkout -B "$COVERAGE_BRANCH"
-          fi
-
           mkdir -p .coverage-history
+          # One-off migration of the history previously kept on the coverage-history branch
+          if [ ! -f .coverage-history/coverage.csv ] && \
+             git ls-tree -r --name-only origin/coverage-history 2>/dev/null | grep -qx '.coverage-history/coverage.csv'; then
+            git show origin/coverage-history:.coverage-history/coverage.csv > .coverage-history/coverage.csv
+          fi
           echo "$DATE,$COMMIT,$COVERAGE" >> .coverage-history/coverage.csv
 
       - name: Generate coverage trend chart
@@ -299,7 +296,6 @@ jobs:
           fi
 
       - name: Commit coverage history
-        if: github.event_name != 'pull_request'
         env:
           GPG_PRIVATE_KEY: ${{ secrets.PUSH_GPG_PRIVATE_KEY }}
           GPG_KEY_ID: ${{ secrets.PUSH_GPG_KEY_ID }}
@@ -319,7 +315,8 @@ jobs:
           fi
 
           git commit -m "Update coverage history [skip ci]"
-          git push origin "$COVERAGE_BRANCH"
+          git pull --rebase origin main
+          git push origin HEAD:main
 
   # ===========================================================================
   # COVERAGE BADGE GENERATION
@@ -395,5 +392,5 @@ jobs:
           echo "All coverage thresholds met!" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "- ✅ Full coverage analyzed" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ Behavioral BDD tests are tracked by behavioral-bdd-tests.yml" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Behavioral BDD tests are tracked by bdd-pr.yml and bdd-nightly.yml" >> $GITHUB_STEP_SUMMARY
           echo "- ✅ Package-level coverage monitored" >> $GITHUB_STEP_SUMMARY
