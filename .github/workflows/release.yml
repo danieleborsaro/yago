@@ -61,6 +61,12 @@ jobs:
           mkdir -p tap/Formula
           for f in $formulas; do
             sed -i '/^  version "/d' "$f"
+            case "$(basename "$f")" in
+              yago@*.rb)
+                sed -i 's/^  license .*/&\n\n  keg_only :versioned_formula/' "$f"
+                grep -q 'keg_only :versioned_formula' "$f"
+                ;;
+            esac
             cp "$f" tap/Formula/
           done
           cd tap
