@@ -99,8 +99,9 @@ brews:
     homepage: "https://github.com/danieleborsaro/homebrew-devops"
     description: "GitOps tool for non-kubernetes platforms"
     license: "Apache-2.0"
-    conflicts:
-      - yago
+    # keg_only :versioned_formula is added by the release workflow, since
+    # GoReleaser has no option for it. It replaces conflicts_with, which
+    # brew audit rejects for keg-only formulae.
     skip_upload: true
 
     test: |
