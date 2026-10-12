@@ -262,16 +262,9 @@ Quick reference for performance thresholds:
 
 ```yaml
 # .github/workflows/bdd-pr.yml
-# Runs on: push to main, develop; pull requests
-# Jobs:
-#   - behavioral-tests (the Go version in go.mod)
-#   - behavioral-contract-validation
-#   - performance-check
-#   - test-quality-gate
-
-# .github/workflows/pr-check.yml
-# Runs on: pull requests
-# Quick validation (< 10 minutes)
+# Runs on: pull requests (affected packages only)
+# Jobs: select, behavioral-tests, performance-check, contract-validation, bdd-gate
+# .github/workflows/coverage.yml runs the full suite + coverage nightly on main
 ```
 
 ### Local Pre-commit

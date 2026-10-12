@@ -2,7 +2,7 @@
 name: BDD Tests (PR)
 
 # Runs only the behavioral tests of the packages affected by the PR.
-# The full suite runs nightly (see bdd-nightly.yml).
+# The full suite runs nightly (see coverage.yml).
 on:
   pull_request:
     branches: [main, develop]

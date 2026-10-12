@@ -226,21 +226,14 @@ Behavioral BDD Test Function (e.g., TestParser_LoadDesiredState_BehavioralBDD)
 - Runs only the BDD tests of packages affected by the PR (`tests/scripts/affected-packages.sh`); changes to `go.mod`, workflows, shared assets/schemas or `internal/utils` run everything
 - Jobs: `select`, `behavioral-tests`, `performance-check`, `contract-validation`, `bdd-gate` (use this as the required check)
 
-**BDD Tests (Nightly)** (`.github/workflows/bdd-nightly.yml`)
+**Nightly Tests and Coverage** (`.github/workflows/coverage.yml`)
 
 - Runs on: schedule (02:00 UTC) and manual dispatch, against `main`
-- Runs the full BDD suite with the race detector. Failure issue reporting is included but commented out.
-
-**PR Quality Check** (`.github/workflows/pr-check.yml`)
-
-- Runs on: Pull requests
-- Fast validation (< 10 minutes)
-- Quick feedback for PR authors
+- Runs the full suite (unit + BDD) with the race detector and tracks coverage. Failure issue reporting is included but commented out.
 
 ### Badges
 
 ![Behavioral BDD Tests](https://github.com/yourusername/yago/workflows/Behavioral%20BDD%20Tests/badge.svg)
-![PR Quality Check](https://github.com/yourusername/yago/workflows/PR%20Quality%20Check/badge.svg)
 ![Go Report Card](https://goreportcard.com/badge/github.com/yourusername/yago)
 ![Codecov](https://codecov.io/gh/yourusername/yago/branch/main/graph/badge.svg)
 
