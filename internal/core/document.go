@@ -441,11 +441,15 @@ func (doc *GitOpsDocument) LoadMetadata(pathToRoot string) error {
 		return errors.Newf(errors.ErrDesiredStateMissing, "metadata file not found: %s", pathToRoot)
 	}
 
-	// Load the file into meta wrapper
-	err := doc.assembledMeta.LoadFile(pathToRoot, doc.envVariables)
+	// lookups resolve files against the repo root, which we only know once parts.self is read,
+	// so read the file raw first and load it properly after computeWorkdir
+	doc.handler.SetInterpolation(false)
+	raw, err := doc.handler.LoadFile(pathToRoot, doc.envVariables)
+	doc.handler.SetInterpolation(true)
 	if err != nil {
 		return errors.Wrapf(errors.ErrParse, err, "failed to load metadata file %s", pathToRoot)
 	}
+	doc.assembledMeta.Data = raw
 
 	// Determine document type BEFORE validation (check for kind field or keys in loaded data)
 	err = doc.determineDocumentTypeFromData(doc.assembledMeta.Data)
@@ -473,6 +477,19 @@ func (doc *GitOpsDocument) LoadMetadata(pathToRoot string) error {
 		return errors.Wrapf(errors.ErrParse, err, "failed to set schema")
 	}
 
+	// Compute workdir by comparing actual path with meta.parts.self
+	err = doc.computeWorkdir(pathToRoot)
+	if err != nil {
+		return errors.Wrapf(errors.ErrFail, err, "failed to compute workdir")
+	}
+
+	// configuration parts load through doc.handler too, so they get the repo root as well
+	doc.handler = parser.NewYAMLHandlerWithSchemaManager(doc.workdir, doc.schemaManager)
+	doc.assembledMeta.Data, err = doc.handler.LoadFile(pathToRoot, doc.envVariables)
+	if err != nil {
+		return errors.Wrapf(errors.ErrParse, err, "failed to load metadata file %s", pathToRoot)
+	}
+
 	// Validate the metadata using the new validation methods
 	logging.Debug("Validating metadata (isDesiredState: %v)", doc.isDesiredState)
 	if doc.isDesiredState {
@@ -489,12 +506,6 @@ func (doc *GitOpsDocument) LoadMetadata(pathToRoot string) error {
 	// NOTE: workdir should remain the git repo root, not be overridden to the file's directory
 	doc.dirname = filepath.Dir(pathToRoot)
 	doc.filename = filepath.Base(pathToRoot)
-
-	// Compute workdir by comparing actual path with meta.parts.self
-	err = doc.computeWorkdir(pathToRoot)
-	if err != nil {
-		return errors.Wrapf(errors.ErrFail, err, "failed to compute workdir")
-	}
 
 	// NOTE: Repo initialization moved to LoadGitOpsFile() to avoid duplication.
 	// LoadGitOpsFile() always calls LoadMetadata() first, then creates the Repo.
